@@ -50,11 +50,6 @@ type RoleInfo struct {
 	SquadName string `json:"squad_name,omitempty"`
 }
 
-type UserSquad struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-}
-
 type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }

@@ -8,6 +8,7 @@ import (
 	"unicorn_app_backend/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 type AvatarHandler struct {
@@ -99,7 +100,6 @@ func (h *AvatarHandler) GetUserAvatar(c *gin.Context) {
 	// Return all user information
 	c.JSON(http.StatusOK, models.UserAvatarResponse{
 		Username:  username,
-		Roles:     roles,
 		Squads:    squads,
 		Countries: countries,
 	})
@@ -132,51 +132,36 @@ func (h *AvatarHandler) CreateUserAvatar(c *gin.Context) {
 
 	// Handle each squad role
 	for _, squadRole := range req.SquadRoles {
-		// Validate role for squad
-		var isValidRole bool
-		err = tx.QueryRow(`
-			SELECT EXISTS (
-				SELECT 1 FROM roles r
-				LEFT JOIN squad_roles sr ON r.id = sr.role_id
-				WHERE r.id = $1 AND (
-					sr.squad_id IS NULL OR -- global role
-					sr.squad_id = $2      -- squad-specific role
-				)
-			)
-		`, squadRole.RoleID, squadRole.SquadID).Scan(&isValidRole)
-
+		// First, ensure the role is linked to the squad in squad_roles table
+		_, err = tx.Exec(`
+			INSERT INTO squad_roles (squad_id, role_id)
+			VALUES ($1, $2)
+			ON CONFLICT (squad_id, role_id) DO NOTHING`,
+			squadRole.SquadID, squadRole.RoleID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate role"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to link role to squad"})
 			return
 		}
 
-		if !isValidRole {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": fmt.Sprintf("Invalid role %d for squad %d",
-					squadRole.RoleID, squadRole.SquadID),
-			})
-			return
-		}
-
-		// Insert or update user_roles
+		// Then assign the role to the user
 		_, err = tx.Exec(`
 			INSERT INTO user_roles (user_id, role_id)
 			VALUES ($1, $2)
 			ON CONFLICT (user_id, role_id) DO NOTHING`,
 			userID, squadRole.RoleID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign role"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign role to user"})
 			return
 		}
 
-		// Insert or update user_squads
+		// Update user's squad membership and status
 		_, err = tx.Exec(`
 			INSERT INTO user_squads (user_id, squad_id, status)
 			VALUES ($1, $2, $3)
 			ON CONFLICT (user_id, squad_id) DO UPDATE SET status = $3`,
 			userID, squadRole.SquadID, squadRole.Status)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign squad"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update squad membership"})
 			return
 		}
 	}
@@ -218,40 +203,58 @@ func (h *AvatarHandler) getUserProfile(userID int) (models.UserAvatarResponse, e
 		return profile, fmt.Errorf("failed to fetch username: %w", err)
 	}
 
-	// Get user's roles with squad information
-	rows, err := h.db.Query(`
-		SELECT r.role 
+	// Get all user roles
+	roleRows, err := h.db.Query(`
+		SELECT DISTINCT r.role 
 		FROM roles r 
 		JOIN user_roles ur ON r.id = ur.role_id 
 		WHERE ur.user_id = $1`, userID)
 	if err != nil {
 		return profile, fmt.Errorf("failed to fetch roles: %w", err)
 	}
-	defer rows.Close()
+	defer roleRows.Close()
 
-	for rows.Next() {
+	for roleRows.Next() {
 		var role string
-		if err := rows.Scan(&role); err != nil {
+		if err := roleRows.Scan(&role); err != nil {
 			return profile, fmt.Errorf("failed to scan role: %w", err)
 		}
 		profile.Roles = append(profile.Roles, role)
 	}
 
-	// Get squads with status
+	// Get squads with their specific roles for this user
 	squadRows, err := h.db.Query(`
-		SELECT s.name, us.status 
-		FROM squads s 
-		JOIN user_squads us ON s.id = us.squad_id 
-		WHERE us.user_id = $1`, userID)
+		SELECT 
+			s.name,
+			us.status,
+			ARRAY_AGG(r.role) as roles
+		FROM user_squads us
+		JOIN squads s ON s.id = us.squad_id
+		LEFT JOIN user_roles ur ON ur.user_id = us.user_id
+		LEFT JOIN roles r ON r.id = ur.role_id
+		LEFT JOIN squad_roles sr ON sr.role_id = r.id AND sr.squad_id = s.id
+		WHERE us.user_id = $1
+		AND (sr.squad_id = s.id OR sr.squad_id IS NULL)
+		GROUP BY s.name, us.status`,
+		userID)
 	if err != nil {
-		return profile, fmt.Errorf("failed to fetch squads: %w", err)
+		return profile, fmt.Errorf("failed to fetch squads and roles: %w", err)
 	}
 	defer squadRows.Close()
 
 	for squadRows.Next() {
 		var squad models.UserSquad
-		if err := squadRows.Scan(&squad.Name, &squad.Status); err != nil {
-			return profile, fmt.Errorf("failed to scan squad: %w", err)
+		var roles []sql.NullString
+		if err := squadRows.Scan(&squad.Name, &squad.Status, pq.Array(&roles)); err != nil {
+			return profile, fmt.Errorf("failed to scan squad info: %w", err)
+		}
+
+		// Filter out null roles
+		squad.Roles = make([]string, 0)
+		for _, role := range roles {
+			if role.Valid && role.String != "" {
+				squad.Roles = append(squad.Roles, role.String)
+			}
 		}
 		profile.Squads = append(profile.Squads, squad)
 	}

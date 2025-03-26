@@ -16,6 +16,12 @@ type AvatarResponse struct {
 	Message string `json:"message"`
 }
 
+type UserSquad struct {
+	Name   string   `json:"name"`
+	Status string   `json:"status"`
+	Roles  []string `json:"roles"`
+}
+
 type UserAvatarResponse struct {
 	Username  string      `json:"username"`
 	Roles     []string    `json:"roles"`
