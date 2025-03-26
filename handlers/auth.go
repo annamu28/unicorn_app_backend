@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -70,65 +73,134 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	c.JSON(http.StatusOK, models.AuthResponse{Token: token})
 }
 
-// LoginRequest matches the Flutter frontend's login request
+// LoginRequest should only have email and password
 type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
-// LoginResponse matches what the Flutter frontend expects
-type LoginResponse struct {
-	Token  string `json:"token"`
-	Result string `json:"result"` // "success" or "failure"
-}
-
+// Login handles user login
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, LoginResponse{
-			Result: "failure",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	// Get user from database
-	var (
-		userID       int
-		passwordHash string
-	)
-	err := h.db.QueryRow("SELECT id, password_hash FROM users WHERE email = $1",
-		req.Email).Scan(&userID, &passwordHash)
-
+	var user struct {
+		ID           int
+		PasswordHash string
+	}
+	err := h.db.QueryRow("SELECT id, password_hash FROM users WHERE email = $1", req.Email).Scan(&user.ID, &user.PasswordHash)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, LoginResponse{
-			Result: "failure",
-		})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
-	// Check password
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, LoginResponse{
-			Result: "failure",
-		})
+	// Verify password
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
-	// Generate JWT token
-	token := h.generateToken(userID)
+	// Generate tokens
+	accessToken, refreshToken, err := h.generateTokens(user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tokens"})
+		return
+	}
 
-	// Return success response
-	c.JSON(http.StatusOK, LoginResponse{
-		Token:  token,
-		Result: "success",
+	// Get user profile
+	userProfile, err := h.getUserProfile(user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user profile"})
+		return
+	}
+
+	// Return everything
+	c.JSON(http.StatusOK, models.LoginResponse{
+		Token:        accessToken,
+		RefreshToken: refreshToken,
+		UserInfo:     userProfile,
 	})
+}
+
+// getUserProfile fetches all related information for a user
+func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
+	var profile models.UserProfile
+
+	// Get username - handle NULL value
+	var username sql.NullString
+	err := h.db.QueryRow("SELECT username FROM users WHERE id = $1", userID).Scan(&username)
+	if err != nil {
+		return profile, fmt.Errorf("error fetching username: %w", err)
+	}
+	if username.Valid {
+		profile.Username = username.String
+	}
+
+	// Get squads with only the user's roles in each squad
+	squadRows, err := h.db.Query(`
+		SELECT 
+			s.name,
+			us.status,
+			ARRAY_AGG(DISTINCT r.role) as roles
+		FROM user_squads us 
+		JOIN squads s ON s.id = us.squad_id 
+		LEFT JOIN user_roles ur ON ur.user_id = us.user_id
+		LEFT JOIN roles r ON r.id = ur.role_id
+		WHERE us.user_id = $1
+		GROUP BY s.name, us.status`, userID)
+	if err != nil {
+		return profile, fmt.Errorf("error fetching squads and roles: %w", err)
+	}
+	defer squadRows.Close()
+
+	for squadRows.Next() {
+		var squad models.SquadInfo
+		var roles []string
+		if err := squadRows.Scan(&squad.Name, &squad.Status, pq.Array(&roles)); err != nil {
+			return profile, fmt.Errorf("error scanning squad info: %w", err)
+		}
+		// Filter out empty roles
+		var filteredRoles []string
+		for _, role := range roles {
+			if role != "" {
+				filteredRoles = append(filteredRoles, role)
+			}
+		}
+		squad.Roles = filteredRoles
+		profile.Squads = append(profile.Squads, squad)
+	}
+
+	// Get countries
+	countryRows, err := h.db.Query(`
+		SELECT c.name 
+		FROM countries c 
+		JOIN user_countries uc ON c.id = uc.country_id 
+		WHERE uc.user_id = $1`, userID)
+	if err != nil {
+		return profile, fmt.Errorf("error fetching countries: %w", err)
+	}
+	defer countryRows.Close()
+
+	for countryRows.Next() {
+		var country string
+		if err := countryRows.Scan(&country); err != nil {
+			return profile, fmt.Errorf("error scanning country: %w", err)
+		}
+		profile.Countries = append(profile.Countries, country)
+	}
+
+	return profile, nil
 }
 
 func (h *AuthHandler) generateToken(userID int) string {
 	claims := &models.Claims{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(365 * 24 * time.Hour)), // 1 year
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
@@ -200,4 +272,85 @@ func (h *AuthHandler) AuthMiddleware() gin.HandlerFunc {
 		c.Set("userID", claims.UserID)
 		c.Next()
 	}
+}
+
+func (h *AuthHandler) generateTokens(userID int) (string, string, error) {
+	// Access token - short lived (1 day)
+	accessClaims := &models.Claims{
+		UserID: userID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims)
+	accessTokenString, _ := accessToken.SignedString(h.jwtSecret)
+
+	// Refresh token - long lived (1 year)
+	refreshToken := generateRandomString(32) // Implement this helper function
+
+	// Store refresh token in database
+	_, err := h.db.Exec(`
+		INSERT INTO refresh_tokens (user_id, token, expires_at)
+		VALUES ($1, $2, $3)`,
+		userID,
+		refreshToken,
+		time.Now().Add(365*24*time.Hour),
+	)
+
+	if err != nil {
+		return "", "", err
+	}
+
+	return accessTokenString, refreshToken, nil
+}
+
+// Add new refresh token endpoint
+func (h *AuthHandler) RefreshToken(c *gin.Context) {
+	var req RefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Verify refresh token exists and is valid
+	var userID int
+	err := h.db.QueryRow(`
+		SELECT user_id 
+		FROM refresh_tokens 
+		WHERE token = $1 AND expires_at > NOW()`,
+		req.RefreshToken,
+	).Scan(&userID)
+
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
+		return
+	}
+
+	// Generate new access token
+	newAccessToken := h.generateToken(userID)
+
+	// Get user profile
+	userProfile, err := h.getUserProfile(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user profile"})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.LoginResponse{
+		Token:        newAccessToken,
+		RefreshToken: req.RefreshToken, // Return same refresh token
+		UserInfo:     userProfile,
+	})
+}
+
+func generateRandomString(length int) string {
+	bytes := make([]byte, length/2)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
+}
+
+// Move the RefreshRequest type from models/auth.go to handlers/auth.go
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
 }

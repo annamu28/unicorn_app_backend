@@ -20,6 +20,7 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 	// Public routes
 	r.POST("/register", authHandler.Register)
 	r.POST("/login", authHandler.Login)
+	r.POST("/refresh", authHandler.RefreshToken)
 
 	// Protected routes
 	protected := r.Group("/")

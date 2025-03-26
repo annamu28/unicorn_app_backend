@@ -25,3 +25,36 @@ type Claims struct {
 	UserID int `json:"user_id"`
 	jwt.RegisteredClaims
 }
+
+type LoginResponse struct {
+	Token        string      `json:"token"`
+	RefreshToken string      `json:"refresh_token"`
+	UserInfo     UserProfile `json:"user_info"`
+}
+
+type UserProfile struct {
+	Username  string      `json:"username"`
+	Squads    []SquadInfo `json:"squads"`
+	Countries []string    `json:"countries"`
+}
+
+type SquadInfo struct {
+	Name   string   `json:"name"`
+	Status string   `json:"status"`
+	Roles  []string `json:"roles"`
+}
+
+type RoleInfo struct {
+	Role      string `json:"role"`
+	SquadID   *int   `json:"squad_id,omitempty"`
+	SquadName string `json:"squad_name,omitempty"`
+}
+
+type UserSquad struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
