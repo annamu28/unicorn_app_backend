@@ -4,7 +4,7 @@ import (
 	"log"
 	"unicorn_app_backend/config"
 	"unicorn_app_backend/db"
-	"unicorn_app_backend/handlers"
+	"unicorn_app_backend/routes"
 
 	"github.com/gin-gonic/gin"
 )
@@ -48,12 +48,8 @@ func main() {
 	// Initialize Gin router
 	r := gin.Default()
 
-	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(database, []byte(cfg.JWTSecret))
-
-	// Register routes
-	r.POST("/register", authHandler.Register)
-	r.POST("/login", authHandler.Login)
+	// Setup routes
+	routes.SetupRoutes(r, database, []byte(cfg.JWTSecret))
 
 	// Start server
 	log.Printf("Server starting on port %s...\n", cfg.ServerPort)
