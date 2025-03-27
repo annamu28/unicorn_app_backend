@@ -130,47 +130,65 @@ func (h *AuthHandler) Login(c *gin.Context) {
 func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 	var profile models.UserProfile
 
-	// Get username - handle NULL value
-	var username sql.NullString
-	err := h.db.QueryRow("SELECT username FROM users WHERE id = $1", userID).Scan(&username)
+	// Get username
+	err := h.db.QueryRow("SELECT username FROM users WHERE id = $1", userID).Scan(&profile.Username)
 	if err != nil {
-		return profile, fmt.Errorf("error fetching username: %w", err)
-	}
-	if username.Valid {
-		profile.Username = username.String
+		return profile, fmt.Errorf("failed to fetch username: %w", err)
 	}
 
-	// Get squads with only the user's roles in each squad
+	// Get all roles for the user
+	roleRows, err := h.db.Query(`
+		SELECT DISTINCT r.role 
+		FROM roles r 
+		JOIN user_roles ur ON r.id = ur.role_id 
+		WHERE ur.user_id = $1`, userID)
+	if err != nil {
+		return profile, fmt.Errorf("failed to fetch roles: %w", err)
+	}
+	defer roleRows.Close()
+
+	for roleRows.Next() {
+		var role string
+		if err := roleRows.Scan(&role); err != nil {
+			return profile, fmt.Errorf("failed to scan role: %w", err)
+		}
+		profile.Roles = append(profile.Roles, role)
+	}
+
+	// Get squads with their specific roles
 	squadRows, err := h.db.Query(`
 		SELECT 
 			s.name,
 			us.status,
-			ARRAY_AGG(DISTINCT r.role) as roles
-		FROM user_squads us 
-		JOIN squads s ON s.id = us.squad_id 
+			ARRAY_AGG(r.role) as roles
+		FROM user_squads us
+		JOIN squads s ON s.id = us.squad_id
 		LEFT JOIN user_roles ur ON ur.user_id = us.user_id
 		LEFT JOIN roles r ON r.id = ur.role_id
+		LEFT JOIN squad_roles sr ON sr.role_id = r.id AND sr.squad_id = s.id
 		WHERE us.user_id = $1
-		GROUP BY s.name, us.status`, userID)
+		AND (sr.squad_id = s.id OR sr.squad_id IS NULL)
+		GROUP BY s.name, us.status`,
+		userID)
 	if err != nil {
-		return profile, fmt.Errorf("error fetching squads and roles: %w", err)
+		return profile, fmt.Errorf("failed to fetch squads: %w", err)
 	}
 	defer squadRows.Close()
 
 	for squadRows.Next() {
-		var squad models.SquadInfo
-		var roles []string
+		var squad models.UserSquad
+		var roles []sql.NullString
 		if err := squadRows.Scan(&squad.Name, &squad.Status, pq.Array(&roles)); err != nil {
-			return profile, fmt.Errorf("error scanning squad info: %w", err)
+			return profile, fmt.Errorf("failed to scan squad: %w", err)
 		}
-		// Filter out empty roles
-		var filteredRoles []string
+
+		// Filter out null roles
+		squad.Roles = make([]string, 0)
 		for _, role := range roles {
-			if role != "" {
-				filteredRoles = append(filteredRoles, role)
+			if role.Valid && role.String != "" {
+				squad.Roles = append(squad.Roles, role.String)
 			}
 		}
-		squad.Roles = filteredRoles
 		profile.Squads = append(profile.Squads, squad)
 	}
 
@@ -181,14 +199,14 @@ func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 		JOIN user_countries uc ON c.id = uc.country_id 
 		WHERE uc.user_id = $1`, userID)
 	if err != nil {
-		return profile, fmt.Errorf("error fetching countries: %w", err)
+		return profile, fmt.Errorf("failed to fetch countries: %w", err)
 	}
 	defer countryRows.Close()
 
 	for countryRows.Next() {
 		var country string
 		if err := countryRows.Scan(&country); err != nil {
-			return profile, fmt.Errorf("error scanning country: %w", err)
+			return profile, fmt.Errorf("failed to scan country: %w", err)
 		}
 		profile.Countries = append(profile.Countries, country)
 	}
@@ -353,4 +371,40 @@ func generateRandomString(length int) string {
 // Move the RefreshRequest type from models/auth.go to handlers/auth.go
 type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+func (h *AuthHandler) Logout(c *gin.Context) {
+	// Get user ID from context (set by auth middleware)
+	userID := c.GetInt("userID")
+
+	// Get refresh token from request
+	var req struct {
+		RefreshToken string `json:"refresh_token" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Refresh token is required"})
+		return
+	}
+
+	// Delete the refresh token from database
+	result, err := h.db.Exec(`
+		DELETE FROM refresh_tokens 
+		WHERE user_id = $1 AND token = $2`,
+		userID, req.RefreshToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to logout"})
+		return
+	}
+
+	// Check if any row was affected
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid refresh token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Successfully logged out",
+	})
 }

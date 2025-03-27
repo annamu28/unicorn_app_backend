@@ -16,6 +16,12 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 	roleHandler := handlers.NewRoleHandler(db)
 	squadHandler := handlers.NewSquadHandler(db)
 	avatarHandler := handlers.NewAvatarHandler(db)
+	chatboardHandler := handlers.NewChatboardHandler(db)
+	postHandler := handlers.NewPostHandler(db)
+	commentHandler := handlers.NewCommentHandler(db)
+	courseHandler := handlers.NewCourseHandler(db)
+	lessonHandler := handlers.NewLessonHandler(db)
+	attendanceHandler := handlers.NewAttendanceHandler(db)
 
 	// Public routes
 	r.POST("/register", authHandler.Register)
@@ -40,5 +46,34 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 		// Squad routes
 		protected.POST("/squads", squadHandler.CreateSquad)
 		protected.GET("/squads", squadHandler.GetSquads)
+
+		// Chatboard routes
+		protected.POST("/chatboards", chatboardHandler.CreateChatboard)
+		protected.GET("/chatboards", chatboardHandler.GetChatboards)
+
+		// Post routes
+		protected.POST("/posts", postHandler.CreatePost)
+		protected.GET("/posts", postHandler.GetPosts)
+		protected.POST("/posts/:id/toggle-pin", postHandler.TogglePin)
+
+		// Comment routes
+		protected.POST("/comments", commentHandler.CreateComment)
+		protected.GET("/comments", commentHandler.GetComments)
+
+		// Course routes
+		protected.POST("/courses", courseHandler.CreateCourse)
+		protected.GET("/courses", courseHandler.GetCourses)
+
+		// Lesson routes
+		protected.POST("/lessons", lessonHandler.CreateLesson)
+		protected.GET("/lessons", lessonHandler.GetLessons)
+
+		// Attendance routes
+		protected.POST("/attendances", attendanceHandler.CreateAttendance)
+		protected.GET("/attendances", attendanceHandler.GetAttendances)
+		protected.DELETE("/attendances/:id", attendanceHandler.DeleteAttendance)
+
+		// Logout route
+		protected.POST("/logout", authHandler.Logout)
 	}
 }

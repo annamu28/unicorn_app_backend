@@ -34,22 +34,7 @@ type LoginResponse struct {
 
 type UserProfile struct {
 	Username  string      `json:"username"`
-	Squads    []SquadInfo `json:"squads"`
+	Roles     []string    `json:"roles"`
+	Squads    []UserSquad `json:"squads"`
 	Countries []string    `json:"countries"`
-}
-
-type SquadInfo struct {
-	Name   string   `json:"name"`
-	Status string   `json:"status"`
-	Roles  []string `json:"roles"`
-}
-
-type RoleInfo struct {
-	Role      string `json:"role"`
-	SquadID   *int   `json:"squad_id,omitempty"`
-	SquadName string `json:"squad_name,omitempty"`
-}
-
-type RefreshRequest struct {
-	RefreshToken string `json:"refresh_token"`
 }
