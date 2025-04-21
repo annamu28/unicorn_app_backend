@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
+	"time"
 	"unicorn_app_backend/models" // replace with your actual project name
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 type PostHandler struct {
@@ -17,41 +20,36 @@ func NewPostHandler(db *sql.DB) *PostHandler {
 }
 
 func (h *PostHandler) CreatePost(c *gin.Context) {
-	userID := c.GetInt("userID") // from auth middleware
-	var req models.CreatePostRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	// Get user ID from context (set by auth middleware)
+	userID := c.GetInt("userID")
+
+	// Bind the request body
+	var input struct {
+		ChatboardID int    `json:"chatboard_id" binding:"required"`
+		Title       string `json:"title" binding:"required"`
+		Content     string `json:"content" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Check if user has access to the chatboard
-	var hasAccess bool
+	// First, verify that the user has access to this chatboard
+	var count int
 	err := h.db.QueryRow(`
-        SELECT EXISTS (
-            SELECT 1 
-            FROM chatboards cb
-            LEFT JOIN chatboard_squads cbs ON cb.id = cbs.chatboard_id
-            LEFT JOIN user_squads us ON us.squad_id = cbs.squad_id
-            LEFT JOIN chatboard_roles cbr ON cb.id = cbr.chatboard_id
-            LEFT JOIN user_roles ur ON ur.role_id = cbr.role_id
-            LEFT JOIN chatboard_countries cbc ON cb.id = cbc.chatboard_id
-            LEFT JOIN user_countries uc ON uc.country_id = cbc.country_id
-            WHERE cb.id = $1 
-            AND us.user_id = $2
-            AND (
-                (us.squad_id IS NOT NULL AND cbs.squad_id IS NOT NULL)
-                OR (ur.role_id IS NOT NULL AND cbr.role_id IS NOT NULL)
-                OR (uc.country_id IS NOT NULL AND cbc.country_id IS NOT NULL)
-            )
-        )
-    `, req.ChatboardID, userID).Scan(&hasAccess)
+        SELECT COUNT(1) FROM chatboard_squads cs
+        JOIN user_squads us ON cs.squad_id = us.squad_id
+        WHERE cs.chatboard_id = $1 AND us.user_id = $2
+    `, input.ChatboardID, userID).Scan(&count)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify access"})
+		log.Printf("Error checking chatboard access: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify chatboard access"})
 		return
 	}
 
-	if !hasAccess {
+	if count == 0 {
 		c.JSON(http.StatusForbidden, gin.H{"error": "You don't have access to this chatboard"})
 		return
 	}
@@ -60,41 +58,45 @@ func (h *PostHandler) CreatePost(c *gin.Context) {
 	var postID int
 	err = h.db.QueryRow(`
         INSERT INTO posts (chatboard_id, user_id, title, content, created_at)
-        VALUES ($1, $2, $3, $4, CURRENT_DATE)
-        RETURNING id, created_at
-    `, req.ChatboardID, userID, req.Title, req.Content).Scan(&postID)
+        VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+        RETURNING id
+    `, input.ChatboardID, userID, input.Title, input.Content).Scan(&postID)
 
 	if err != nil {
+		log.Printf("Error creating post: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create post"})
 		return
 	}
 
-	// Get the complete post information including author username
-	var post models.PostResponse
+	// Fetch the created post
+	var post models.Post
 	err = h.db.QueryRow(`
         SELECT 
             p.id,
-            p.chatboard_id,
-            p.user_id,
             p.title,
             p.content,
+            p.pinned,
             p.created_at,
-            u.username
+            u.first_name,
+            u.last_name,
+            u.email
         FROM posts p
-        JOIN users u ON u.id = p.user_id
+        JOIN users u ON p.user_id = u.id
         WHERE p.id = $1
     `, postID).Scan(
 		&post.ID,
-		&post.ChatboardID,
-		&post.UserID,
 		&post.Title,
 		&post.Content,
+		&post.Pinned,
 		&post.CreatedAt,
-		&post.Author,
+		&post.Author.FirstName,
+		&post.Author.LastName,
+		&post.Author.Email,
 	)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch post details"})
+		log.Printf("Error fetching created post: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Post created but failed to fetch details"})
 		return
 	}
 
@@ -104,40 +106,48 @@ func (h *PostHandler) CreatePost(c *gin.Context) {
 func (h *PostHandler) GetPosts(c *gin.Context) {
 	userID := c.GetInt("userID")
 	chatboardID := c.Query("chatboard_id")
-
 	if chatboardID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "chatboard_id query parameter is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Chatboard ID is required"})
 		return
 	}
 
-	// First check if user has access and get their role
+	// Check if user has access to the chatboard through any of the access methods (squads, roles, or countries)
 	var hasAccess bool
-	var userRole string
 	err := h.db.QueryRow(`
-        WITH user_access AS (
-            SELECT DISTINCT r.role
+        SELECT EXISTS (
+            SELECT 1
             FROM chatboards cb
-            LEFT JOIN chatboard_squads cbs ON cb.id = cbs.chatboard_id
-            LEFT JOIN user_squads us ON us.squad_id = cbs.squad_id
-            LEFT JOIN chatboard_roles cbr ON cb.id = cbr.chatboard_id
-            LEFT JOIN user_roles ur ON ur.role_id = cbr.role_id
-            LEFT JOIN roles r ON r.id = ur.role_id
-            LEFT JOIN chatboard_countries cbc ON cb.id = cbc.chatboard_id
-            LEFT JOIN user_countries uc ON uc.country_id = cbc.country_id
-            WHERE cb.id = $1 
-            AND us.user_id = $2
+            WHERE cb.id = $1
             AND (
-                (us.squad_id IS NOT NULL AND cbs.squad_id IS NOT NULL)
-                OR (ur.role_id IS NOT NULL AND cbr.role_id IS NOT NULL)
-                OR (uc.country_id IS NOT NULL AND cbc.country_id IS NOT NULL)
+                -- Check squad access
+                EXISTS (
+                    SELECT 1 FROM chatboard_squads cs
+                    JOIN user_squads us ON cs.squad_id = us.squad_id
+                    WHERE cs.chatboard_id = cb.id
+                    AND us.user_id = $2
+                    AND us.status = 'active'
+                )
+                OR
+                -- Check role access
+                EXISTS (
+                    SELECT 1 FROM chatboard_roles cr
+                    JOIN user_roles ur ON cr.role_id = ur.role_id
+                    WHERE cr.chatboard_id = cb.id
+                    AND ur.user_id = $2
+                )
+                OR
+                -- Check country access
+                EXISTS (
+                    SELECT 1 FROM chatboard_countries cc
+                    JOIN user_countries uc ON cc.country_id = uc.country_id
+                    WHERE cc.chatboard_id = cb.id
+                    AND uc.user_id = $2
+                )
             )
-            LIMIT 1
-        )
-        SELECT EXISTS (SELECT 1 FROM user_access), 
-               (SELECT role FROM user_access)
-    `, chatboardID, userID).Scan(&hasAccess, &userRole)
+    )`, chatboardID, userID).Scan(&hasAccess)
 
 	if err != nil {
+		log.Printf("Error checking access: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify access"})
 		return
 	}
@@ -147,64 +157,81 @@ func (h *PostHandler) GetPosts(c *gin.Context) {
 		return
 	}
 
-	// Get posts with author information, comment count, and pin status
+	// Updated query to get username and roles
 	rows, err := h.db.Query(`
+        WITH user_chatboard_roles AS (
+            SELECT DISTINCT ur.user_id, array_agg(r.role) as roles
+            FROM chatboard_roles cr
+            JOIN user_roles ur ON cr.role_id = ur.role_id
+            JOIN roles r ON ur.role_id = r.id
+            WHERE cr.chatboard_id = $1
+            GROUP BY ur.user_id
+        )
         SELECT 
             p.id,
-            p.chatboard_id,
-            p.user_id,
             p.title,
             p.content,
+            p.pinned,
             p.created_at,
             u.username,
-            COUNT(c.id) as comment_count,
-            p.pinned
+            COALESCE(ucr.roles, '{}') as user_roles
         FROM posts p
-        JOIN users u ON u.id = p.user_id
-        LEFT JOIN comments c ON c.post_id = p.id
+        JOIN users u ON p.user_id = u.id
+        LEFT JOIN user_chatboard_roles ucr ON u.id = ucr.user_id
         WHERE p.chatboard_id = $1
-        GROUP BY 
-            p.id, 
-            p.chatboard_id, 
-            p.user_id, 
-            p.title, 
-            p.content, 
-            p.created_at, 
-            u.username,
-            p.pinned
-        ORDER BY 
-            p.pinned DESC,           -- Pinned posts first
-            p.created_at DESC        -- Then by date (newest first)
-    `, chatboardID)
-
+        ORDER BY p.pinned DESC, p.created_at DESC`,
+		chatboardID)
 	if err != nil {
+		log.Printf("Error fetching posts: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch posts"})
 		return
 	}
 	defer rows.Close()
 
-	var posts []models.PostResponse
+	var posts []gin.H
 	for rows.Next() {
-		var post models.PostResponse
-		var commentCount int
+		var (
+			id        int
+			title     string
+			content   string
+			pinned    bool
+			createdAt time.Time
+			username  sql.NullString
+			roles     []string
+		)
+
 		err := rows.Scan(
-			&post.ID,
-			&post.ChatboardID,
-			&post.UserID,
-			&post.Title,
-			&post.Content,
-			&post.CreatedAt,
-			&post.Author,
-			&commentCount,
-			&post.Pinned,
+			&id,
+			&title,
+			&content,
+			&pinned,
+			&createdAt,
+			&username,
+			pq.Array(&roles),
 		)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan post"})
-			return
+			log.Printf("Error scanning post: %v", err)
+			continue
 		}
-		post.CommentCount = commentCount
-		post.UserRole = userRole // Add the user's role for the chatboard
+
+		post := gin.H{
+			"id":         id,
+			"title":      title,
+			"content":    content,
+			"pinned":     pinned,
+			"created_at": createdAt,
+			"author": gin.H{
+				"username": username.String,
+				"roles":    roles,
+			},
+		}
 		posts = append(posts, post)
+	}
+
+	if err = rows.Err(); err != nil {
+		log.Printf("Error iterating posts: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing posts"})
+		return
 	}
 
 	c.JSON(http.StatusOK, posts)

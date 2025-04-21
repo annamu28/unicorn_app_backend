@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"unicorn_app_backend/models"
 
@@ -19,6 +20,32 @@ func NewChatboardHandler(db *sql.DB) *ChatboardHandler {
 }
 
 func (h *ChatboardHandler) CreateChatboard(c *gin.Context) {
+	// Get user ID from context
+	userID := c.GetInt("userID")
+
+	// Check if user has permission to create chatboards
+	var hasPermission bool
+	err := h.db.QueryRow(`
+        SELECT EXISTS (
+            SELECT 1 
+            FROM user_roles ur
+            JOIN roles r ON r.id = ur.role_id
+            WHERE ur.user_id = $1 
+            AND r.role IN ('Admin', 'Head Unicorn')
+        )
+    `, userID).Scan(&hasPermission)
+
+	if err != nil {
+		log.Printf("Error checking permissions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify permissions"})
+		return
+	}
+
+	if !hasPermission {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only admins and head unicorns can create chatboards"})
+		return
+	}
+
 	var req models.CreateChatboardRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -300,4 +327,95 @@ func nullStringArrayToStringArray(nullStrings []sql.NullString) []string {
 		}
 	}
 	return result
+}
+
+func (h *ChatboardHandler) GetPendingUsers(c *gin.Context) {
+	// Get chatboard ID from URL
+	chatboardID := c.Param("id")
+	if chatboardID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Chatboard ID is required"})
+		return
+	}
+
+	// Get the requesting user's ID
+	adminID := c.GetInt("userID")
+
+	// Check if the user has permission (must be Admin or Head Unicorn)
+	var hasPermission bool
+	err := h.db.QueryRow(`
+        SELECT EXISTS (
+            SELECT 1 FROM user_roles ur
+            JOIN roles r ON r.id = ur.role_id
+            WHERE ur.user_id = $1 
+            AND r.role IN ('Admin', 'Head Unicorn')
+        )
+    `, adminID).Scan(&hasPermission)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permissions"})
+		return
+	}
+
+	if !hasPermission {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You don't have permission to view pending users"})
+		return
+	}
+
+	// Get all pending users for the chatboard's squads
+	rows, err := h.db.Query(`
+        WITH chatboard_squad_ids AS (
+            SELECT DISTINCT cs.squad_id
+            FROM chatboard_squads cs
+            WHERE cs.chatboard_id = $1
+        )
+        SELECT 
+            u.id,
+            u.first_name,
+            u.last_name,
+            u.email,
+            s.id as squad_id,
+            s.name as squad_name,
+            us.status
+        FROM users u
+        JOIN user_squads us ON us.user_id = u.id
+        JOIN squads s ON s.id = us.squad_id
+        WHERE s.id IN (SELECT squad_id FROM chatboard_squad_ids)
+        AND us.status = 'Pending'
+        ORDER BY u.first_name, u.last_name, s.name
+    `, chatboardID)
+
+	if err != nil {
+		log.Printf("Error fetching pending users: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch pending users"})
+		return
+	}
+	defer rows.Close()
+
+	var pendingUsers []models.PendingUserResponse
+	for rows.Next() {
+		var user models.PendingUserResponse
+		err := rows.Scan(
+			&user.UserID,
+			&user.FirstName,
+			&user.LastName,
+			&user.Email,
+			&user.SquadID,
+			&user.SquadName,
+			&user.Status,
+		)
+		if err != nil {
+			log.Printf("Error scanning user row: %v", err)
+			continue
+		}
+		pendingUsers = append(pendingUsers, user)
+	}
+
+	if pendingUsers == nil {
+		pendingUsers = make([]models.PendingUserResponse, 0)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"pending_users": pendingUsers,
+		"count":         len(pendingUsers),
+	})
 }

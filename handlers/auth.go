@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -29,48 +30,59 @@ func NewAuthHandler(db *sql.DB, jwtSecret []byte) *AuthHandler {
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
-	var req models.RegisterRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	var input struct {
+		FirstName string `json:"first_name" binding:"required"`
+		LastName  string `json:"last_name" binding:"required"`
+		Email     string `json:"email" binding:"required,email"`
+		Password  string `json:"password" binding:"required,min=6"`
+		Birthday  string `json:"birthday" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Hash password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	// Hash the password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
 		return
 	}
 
-	// Parse birthday
-	birthday, err := time.Parse("2006-01-02", req.Birthday)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid birthday format"})
-		return
-	}
-
-	// Insert user into database
+	// Insert the new user
 	var userID int
 	err = h.db.QueryRow(`
 		INSERT INTO users (first_name, last_name, email, password_hash, birthday)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id`,
-		req.FirstName, req.LastName, req.Email, string(hashedPassword), birthday,
-	).Scan(&userID)
+		input.FirstName, input.LastName, input.Email, string(hashedPassword), input.Birthday).Scan(&userID)
 
 	if err != nil {
-		if err.Error() == "pq: duplicate key value violates unique constraint \"users_email_key\"" {
+		if strings.Contains(err.Error(), "duplicate key") {
 			c.JSON(http.StatusConflict, gin.H{"error": "Email already exists"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 		return
 	}
 
-	// Generate JWT token
-	token := h.generateToken(userID)
+	// Generate tokens
+	accessToken, refreshToken, err := h.generateTokens(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate tokens"})
+		return
+	}
 
-	c.JSON(http.StatusOK, models.AuthResponse{Token: token})
+	// Return response with all requested fields
+	c.JSON(http.StatusOK, models.LoginResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		UserID:       userID,
+		FirstName:    input.FirstName,
+		LastName:     input.LastName,
+		Email:        input.Email,
+	})
 }
 
 // LoginRequest should only have email and password
@@ -81,8 +93,12 @@ type LoginRequest struct {
 
 // Login handles user login
 func (h *AuthHandler) Login(c *gin.Context) {
-	var req LoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var input struct {
+		Email    string `json:"email" binding:"required,email"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -90,17 +106,37 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	// Get user from database
 	var user struct {
 		ID           int
+		Email        string
+		FirstName    string
+		LastName     string
 		PasswordHash string
 	}
-	err := h.db.QueryRow("SELECT id, password_hash FROM users WHERE email = $1", req.Email).Scan(&user.ID, &user.PasswordHash)
-	if err != nil {
+
+	err := h.db.QueryRow(`
+		SELECT id, email, first_name, last_name, password_hash 
+		FROM users 
+		WHERE email = $1`,
+		input.Email).Scan(&user.ID, &user.Email, &user.FirstName, &user.LastName, &user.PasswordHash)
+
+	if err == sql.ErrNoRows {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
 		return
 	}
 
 	// Verify password
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
+	}
+
+	// After successful password verification, fetch user profile data
+	profile, err := h.getUserProfile(user.ID)
+	if err != nil {
+		log.Printf("Error getting user profile: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user profile"})
 		return
 	}
 
@@ -111,37 +147,50 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	// Get user profile
-	userProfile, err := h.getUserProfile(user.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user profile"})
-		return
+	// Return complete response
+	response := models.LoginResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		UserID:       user.ID,
+		FirstName:    user.FirstName,
+		LastName:     user.LastName,
+		Email:        user.Email,
+		Profile:      profile,
 	}
 
-	// Return everything
-	c.JSON(http.StatusOK, models.LoginResponse{
-		Token:        accessToken,
-		RefreshToken: refreshToken,
-		UserInfo:     userProfile,
-	})
+	c.JSON(http.StatusOK, response)
 }
 
 // getUserProfile fetches all related information for a user
 func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
-	var profile models.UserProfile
-
-	// Get username
-	err := h.db.QueryRow("SELECT username FROM users WHERE id = $1", userID).Scan(&profile.Username)
-	if err != nil {
-		return profile, fmt.Errorf("failed to fetch username: %w", err)
+	profile := models.UserProfile{
+		Roles:     make([]string, 0),
+		Squads:    make([]models.UserSquad, 0),
+		Countries: make([]string, 0),
 	}
 
-	// Get all roles for the user
+	// Get username
+	var username sql.NullString
+	err := h.db.QueryRow(`
+		SELECT username FROM users WHERE id = $1
+	`, userID).Scan(&username)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return profile, nil
+		}
+		return profile, fmt.Errorf("failed to fetch username: %w", err)
+	}
+	if username.Valid {
+		profile.Username = username.String
+	}
+
+	// Get global roles
 	roleRows, err := h.db.Query(`
 		SELECT DISTINCT r.role 
-		FROM roles r 
-		JOIN user_roles ur ON r.id = ur.role_id 
-		WHERE ur.user_id = $1`, userID)
+		FROM user_roles ur
+		JOIN roles r ON r.id = ur.role_id
+		WHERE ur.user_id = $1
+	`, userID)
 	if err != nil {
 		return profile, fmt.Errorf("failed to fetch roles: %w", err)
 	}
@@ -149,27 +198,29 @@ func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 
 	for roleRows.Next() {
 		var role string
-		if err := roleRows.Scan(&role); err != nil {
-			return profile, fmt.Errorf("failed to scan role: %w", err)
+		if err := roleRows.Scan(&role); err == nil {
+			profile.Roles = append(profile.Roles, role)
 		}
-		profile.Roles = append(profile.Roles, role)
 	}
 
-	// Get squads with their specific roles
+	// Get squads with their roles
 	squadRows, err := h.db.Query(`
 		SELECT 
+			s.id,
 			s.name,
 			us.status,
-			ARRAY_AGG(r.role) as roles
+			COALESCE(
+				ARRAY_AGG(r.role) FILTER (WHERE r.role IS NOT NULL),
+				ARRAY[]::VARCHAR[]
+			) as roles
 		FROM user_squads us
 		JOIN squads s ON s.id = us.squad_id
-		LEFT JOIN user_roles ur ON ur.user_id = us.user_id
-		LEFT JOIN roles r ON r.id = ur.role_id
-		LEFT JOIN squad_roles sr ON sr.role_id = r.id AND sr.squad_id = s.id
+		LEFT JOIN user_squad_roles usr ON usr.squad_id = s.id AND usr.user_id = us.user_id
+		LEFT JOIN roles r ON r.id = usr.role_id
 		WHERE us.user_id = $1
-		AND (sr.squad_id = s.id OR sr.squad_id IS NULL)
-		GROUP BY s.name, us.status`,
-		userID)
+		GROUP BY s.id, s.name, us.status
+		ORDER BY s.name
+	`, userID)
 	if err != nil {
 		return profile, fmt.Errorf("failed to fetch squads: %w", err)
 	}
@@ -178,14 +229,13 @@ func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 	for squadRows.Next() {
 		var squad models.UserSquad
 		var roles []sql.NullString
-		if err := squadRows.Scan(&squad.Name, &squad.Status, pq.Array(&roles)); err != nil {
+		if err := squadRows.Scan(&squad.ID, &squad.Name, &squad.Status, pq.Array(&roles)); err != nil {
 			return profile, fmt.Errorf("failed to scan squad: %w", err)
 		}
 
-		// Filter out null roles
 		squad.Roles = make([]string, 0)
 		for _, role := range roles {
-			if role.Valid && role.String != "" {
+			if role.Valid {
 				squad.Roles = append(squad.Roles, role.String)
 			}
 		}
@@ -195,9 +245,11 @@ func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 	// Get countries
 	countryRows, err := h.db.Query(`
 		SELECT c.name 
-		FROM countries c 
-		JOIN user_countries uc ON c.id = uc.country_id 
-		WHERE uc.user_id = $1`, userID)
+		FROM user_countries uc
+		JOIN countries c ON c.id = uc.country_id
+		WHERE uc.user_id = $1
+		ORDER BY c.name
+	`, userID)
 	if err != nil {
 		return profile, fmt.Errorf("failed to fetch countries: %w", err)
 	}
@@ -205,10 +257,9 @@ func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 
 	for countryRows.Next() {
 		var country string
-		if err := countryRows.Scan(&country); err != nil {
-			return profile, fmt.Errorf("failed to scan country: %w", err)
+		if err := countryRows.Scan(&country); err == nil {
+			profile.Countries = append(profile.Countries, country)
 		}
-		profile.Countries = append(profile.Countries, country)
 	}
 
 	return profile, nil
@@ -254,7 +305,6 @@ func (h *AuthHandler) AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Check if the header has the Bearer prefix
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header must be in the format: Bearer {token}"})
@@ -263,11 +313,12 @@ func (h *AuthHandler) AuthMiddleware() gin.HandlerFunc {
 		}
 
 		tokenString := parts[1]
-
-		// Parse and validate the token
 		claims := &models.Claims{}
+
+		// Add debug logging
+		log.Printf("Validating token: %s", tokenString[:10]) // Only log first 10 chars for security
+
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-			// Validate the signing method
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
@@ -275,6 +326,7 @@ func (h *AuthHandler) AuthMiddleware() gin.HandlerFunc {
 		})
 
 		if err != nil {
+			log.Printf("Token validation error: %v", err)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
 			c.Abort()
 			return
@@ -286,8 +338,11 @@ func (h *AuthHandler) AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Set the user ID in the context
+		// Set both userID and token in context
 		c.Set("userID", claims.UserID)
+		c.Set("token", tokenString)
+
+		log.Printf("Successfully authenticated user: %d", claims.UserID)
 		c.Next()
 	}
 }
@@ -346,20 +401,20 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	}
 
 	// Generate new access token
-	newAccessToken := h.generateToken(userID)
-
-	// Get user profile
-	userProfile, err := h.getUserProfile(userID)
+	accessToken, err := h.generateAccessToken(userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user profile"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate access token"})
 		return
 	}
 
-	c.JSON(http.StatusOK, models.LoginResponse{
-		Token:        newAccessToken,
-		RefreshToken: req.RefreshToken, // Return same refresh token
-		UserInfo:     userProfile,
-	})
+	// Return the response using the correct struct fields
+	response := models.LoginResponse{
+		AccessToken:  accessToken,
+		RefreshToken: req.RefreshToken,
+		UserID:       userID,
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 func generateRandomString(length int) string {
@@ -407,4 +462,129 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Successfully logged out",
 	})
+}
+
+func (h *AuthHandler) verifyPassword(inputPassword, storedPasswordHash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(storedPasswordHash), []byte(inputPassword))
+	return err == nil
+}
+
+func (h *AuthHandler) generateAccessToken(userID int) (string, error) {
+	claims := &models.Claims{
+		UserID: userID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(h.jwtSecret)
+	if err != nil {
+		return "", err
+	}
+	return tokenString, nil
+}
+
+func (h *AuthHandler) generateRefreshToken(userID int) (string, error) {
+	claims := &models.Claims{
+		UserID: userID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(365 * 24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(h.jwtSecret)
+	if err != nil {
+		return "", err
+	}
+	return tokenString, nil
+}
+
+func (h *AuthHandler) GetSquads(c *gin.Context) {
+	userID := c.GetInt("userID")
+
+	// Query to get squads with their status for the user
+	rows, err := h.db.Query(`
+		SELECT 
+			s.id,
+			s.name,
+			us.status
+		FROM squads s
+		JOIN user_squads us ON s.id = us.squad_id
+		WHERE us.user_id = $1
+		ORDER BY s.name`,
+		userID)
+	if err != nil {
+		log.Printf("Error fetching squads: %v", err)
+		c.JSON(http.StatusOK, []gin.H{}) // Return empty array instead of error
+		return
+	}
+	defer rows.Close()
+
+	// Slice to store the squads
+	var squads []gin.H
+
+	// Iterate through the rows
+	for rows.Next() {
+		var (
+			id     int
+			name   string
+			status string
+		)
+
+		// Scan the row into variables
+		if err := rows.Scan(&id, &name, &status); err != nil {
+			log.Printf("Error scanning squad row: %v", err)
+			continue
+		}
+
+		// Add squad to the slice
+		squads = append(squads, gin.H{
+			"id":     id,
+			"name":   name,
+			"status": status,
+		})
+	}
+
+	// Check for errors during iteration
+	if err = rows.Err(); err != nil {
+		log.Printf("Error iterating squad rows: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch squads"})
+		return
+	}
+
+	// Return the squads
+	c.JSON(http.StatusOK, squads)
+}
+
+// Similar updates for GetCountries and GetRoles
+
+func (h *AuthHandler) GetUserInfo(c *gin.Context) {
+	userID := c.GetInt("userID")
+
+	// Create an instance of AvatarHandler to use its getUserProfile method
+	avatarHandler := &AvatarHandler{db: h.db}
+
+	profile, err := avatarHandler.getUserProfile(userID)
+	if err != nil {
+		log.Printf("Error getting user profile: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user info"})
+		return
+	}
+
+	// Initialize empty arrays if they're nil
+	if profile.Squads == nil {
+		profile.Squads = []models.UserSquad{}
+	}
+	if profile.Roles == nil {
+		profile.Roles = []string{}
+	}
+	if profile.Countries == nil {
+		profile.Countries = []string{}
+	}
+
+	c.JSON(http.StatusOK, profile)
 }

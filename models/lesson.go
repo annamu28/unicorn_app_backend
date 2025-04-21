@@ -1,6 +1,12 @@
 package models
 
-import "time"
+type Lesson struct {
+	ID          int    `json:"id"`
+	CourseID    int    `json:"course_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"created_at"`
+}
 
 type CreateLessonRequest struct {
 	CourseID    int    `json:"course_id" binding:"required"`
@@ -9,9 +15,9 @@ type CreateLessonRequest struct {
 }
 
 type LessonResponse struct {
-	ID          int       `json:"id"`
-	CourseID    int       `json:"course_id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int    `json:"id"`
+	CourseID    int    `json:"course_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"created_at"`
 }

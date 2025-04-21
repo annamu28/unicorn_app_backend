@@ -13,8 +13,8 @@ type RegisterRequest struct {
 }
 
 type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
 type AuthResponse struct {
@@ -27,9 +27,13 @@ type Claims struct {
 }
 
 type LoginResponse struct {
-	Token        string      `json:"token"`
+	AccessToken  string      `json:"access_token"`
 	RefreshToken string      `json:"refresh_token"`
-	UserInfo     UserProfile `json:"user_info"`
+	UserID       int         `json:"user_id"`
+	FirstName    string      `json:"first_name"`
+	LastName     string      `json:"last_name"`
+	Email        string      `json:"email"`
+	Profile      UserProfile `json:"profile"`
 }
 
 type UserProfile struct {
@@ -37,4 +41,10 @@ type UserProfile struct {
 	Roles     []string    `json:"roles"`
 	Squads    []UserSquad `json:"squads"`
 	Countries []string    `json:"countries"`
+}
+
+type User struct {
+	ID           int    `json:"id"`
+	Email        string `json:"email"`
+	PasswordHash string `json:"-"` // "-" means this field won't be included in JSON
 }

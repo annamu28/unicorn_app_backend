@@ -1,4 +1,5 @@
 package models
+
 type CreateChatboardRequest struct {
 	Title       string          `json:"title" binding:"required"`
 	Description string          `json:"description" binding:"required"`
@@ -23,4 +24,14 @@ type ChatboardAccessInfo struct {
 	Squads    []string `json:"squads"`
 	Roles     []string `json:"roles"`
 	Countries []string `json:"countries"`
-} 
+}
+
+type PendingUserResponse struct {
+	UserID    int    `json:"user_id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Email     string `json:"email"`
+	SquadID   int    `json:"squad_id"`
+	SquadName string `json:"squad_name"`
+	Status    string `json:"status"`
+}

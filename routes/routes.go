@@ -22,6 +22,7 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 	courseHandler := handlers.NewCourseHandler(db)
 	lessonHandler := handlers.NewLessonHandler(db)
 	attendanceHandler := handlers.NewAttendanceHandler(db)
+	testHandler := handlers.NewTestHandler(db)
 
 	// Public routes
 	r.POST("/register", authHandler.Register)
@@ -50,6 +51,7 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 		// Chatboard routes
 		protected.POST("/chatboards", chatboardHandler.CreateChatboard)
 		protected.GET("/chatboards", chatboardHandler.GetChatboards)
+		protected.GET("/chatboards/:id/pending-users", chatboardHandler.GetPendingUsers)
 
 		// Post routes
 		protected.POST("/posts", postHandler.CreatePost)
@@ -73,7 +75,22 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 		protected.GET("/attendances", attendanceHandler.GetAttendances)
 		protected.DELETE("/attendances/:id", attendanceHandler.DeleteAttendance)
 
+		// Test routes
+		protected.POST("/tests", testHandler.CreateTest)
+		protected.GET("/tests", testHandler.GetTests)
+		protected.GET("/tests/:id", testHandler.GetTestByID)
+		protected.POST("/tests/attempt", testHandler.SubmitTestAttempt)
+		protected.GET("/rewards", testHandler.GetUserRewards)
+		protected.POST("/rewards", testHandler.CreateReward)
+		protected.PUT("/rewards/:id", testHandler.UpdateReward)
+
 		// Logout route
 		protected.POST("/logout", authHandler.Logout)
+
+		// User info route
+		protected.GET("/userinfo", authHandler.GetUserInfo)
+
+		// Verification route
+		protected.POST("/verification", avatarHandler.VerifyUserSquad)
 	}
 }

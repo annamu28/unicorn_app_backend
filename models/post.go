@@ -20,3 +20,18 @@ type PostResponse struct {
 	UserRole     string    `json:"user_role"` // Add this field
 	Pinned       bool      `json:"pinned"`
 }
+
+type Post struct {
+	ID        int       `json:"id"`
+	Title     string    `json:"title"`
+	Content   string    `json:"content"`
+	Pinned    bool      `json:"pinned"`
+	CreatedAt time.Time `json:"created_at"`
+	Author    Author    `json:"author"`
+}
+
+type Author struct {
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Email     string `json:"email"`
+}

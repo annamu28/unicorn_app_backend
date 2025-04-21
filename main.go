@@ -1,59 +1,125 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"fmt"
 	"log"
-	"unicorn_app_backend/config"
-	"unicorn_app_backend/db"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 	"unicorn_app_backend/routes"
 
+	_ "github.com/lib/pq"
+
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 )
 
 func main() {
-	// Load configuration
-	cfg, err := config.Load()
+	// Add godotenv at the start of main()
+	if err := godotenv.Load(); err != nil {
+		log.Println("Warning: .env file not found") // Non-fatal in production
+	}
+
+	// Get port from environment variable
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	// Database configuration for Docker
+	dbHost := os.Getenv("DB_HOST")
+	if dbHost == "" {
+		dbHost = "db" // Default Docker service name
+	}
+	dbPort := os.Getenv("DB_PORT")
+	if dbPort == "" {
+		dbPort = "5432" // Default PostgreSQL port
+	}
+	dbUser := os.Getenv("DB_USER")
+	if dbUser == "" {
+		dbUser = "postgres" // Default user
+	}
+	dbPassword := os.Getenv("DB_PASSWORD")
+	if dbPassword == "" {
+		log.Fatal("DB_PASSWORD environment variable is required")
+	}
+	dbName := os.Getenv("DB_NAME")
+	if dbName == "" {
+		dbName = "postgres" // Default database name
+	}
+
+	// Construct database connection string for Docker
+	dbURL := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		dbHost, dbPort, dbUser, dbPassword, dbName)
+
+	// Get JWT secret from environment variable
+	jwtSecret := []byte(os.Getenv("JWT_SECRET"))
+	if len(jwtSecret) == 0 {
+		log.Fatal("JWT_SECRET environment variable is required")
+	}
+
+	// Connect to database
+	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatal("Failed to load configuration:", err)
+		log.Fatalf("Error connecting to database: %v", err)
+	}
+	defer db.Close()
+
+	// Test database connection
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Error connecting to the database: %v", err)
 	}
 
-	// Add debug logging
-	log.Printf("Database config: host=%s port=%d user=%s dbname=%s",
-		cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBName)
-
-	// Set Gin mode based on environment
-	if cfg.Environment != "development" {
-		gin.SetMode(gin.ReleaseMode)
-	}
-
-	// Initialize database
-	dbConfig := db.Config{
-		Host:     cfg.DBHost,
-		Port:     cfg.DBPort,
-		User:     cfg.DBUser,
-		Password: cfg.DBPassword,
-		DBName:   cfg.DBName,
-	}
-
-	database, err := db.Initialize(dbConfig)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer database.Close()
-
-	// Initialize schema
-	if err := db.InitSchema(database); err != nil {
-		log.Fatal(err)
-	}
-
-	// Initialize Gin router
+	// Initialize router
 	r := gin.Default()
 
-	// Setup routes
-	routes.SetupRoutes(r, database, []byte(cfg.JWTSecret))
+	// Setup CORS - Simplified for mobile app
+	config := cors.DefaultConfig()
+	config.AllowAllOrigins = true // Allow all origins for mobile app
+	config.AllowHeaders = []string{
+		"Origin",
+		"Content-Length",
+		"Content-Type",
+		"Authorization",
+	}
+	config.AllowMethods = []string{
+		"GET",
+		"POST",
+		"PUT",
+		"DELETE",
+		"PATCH",
+	}
+	r.Use(cors.New(config))
 
-	// Start server
-	log.Printf("Server starting on port %s...\n", cfg.ServerPort)
-	if err := r.Run(":" + cfg.ServerPort); err != nil {
-		log.Fatal(err)
+	// Setup routes
+	routes.SetupRoutes(r, db, jwtSecret)
+
+	// Run server
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: r,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
 	}
 }
