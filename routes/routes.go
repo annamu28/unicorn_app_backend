@@ -4,6 +4,7 @@ import (
 	"database/sql"
 
 	"unicorn_app_backend/handlers"
+	"unicorn_app_backend/middleware"
 
 	"github.com/gin-gonic/gin"
 )
@@ -24,6 +25,7 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 	attendanceHandler := handlers.NewAttendanceHandler(db)
 	testHandler := handlers.NewTestHandler(db)
 	healthHandler := handlers.NewHealthHandler(db)
+	userHandler := handlers.NewUserHandler(db)
 
 	// Public routes
 	r.GET("/health", healthHandler.HealthCheck)
@@ -36,7 +38,7 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 
 	// Protected routes
 	protected := r.Group("/")
-	protected.Use(authHandler.AuthMiddleware()) // You'll need to implement this middleware
+	protected.Use(middleware.AuthMiddleware(db, jwtSecret)) // Pass the required parameters
 	{
 		//Avatar route
 		protected.POST("/avatar", avatarHandler.CreateUserAvatar)
@@ -82,16 +84,28 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 		protected.DELETE("/attendances/:id", attendanceHandler.DeleteAttendance)
 
 		// Test routes
-		protected.POST("/tests", testHandler.CreateTest)
-		protected.GET("/tests", testHandler.GetTests)
-		protected.GET("/tests/:id", testHandler.GetTestByID)
-		protected.POST("/tests/attempt", testHandler.SubmitTestAttempt)
-		protected.GET("/rewards", testHandler.GetUserRewards)
-		protected.POST("/rewards", testHandler.CreateReward)
-		protected.PUT("/rewards/:id", testHandler.UpdateReward)
+		testRoutes := protected.Group("/tests")
+		{
+			testRoutes.GET("", testHandler.GetTests)
+			testRoutes.GET("/:id", testHandler.GetTestByID)
+			testRoutes.POST("", testHandler.CreateTest)
+			testRoutes.POST("/attempt", testHandler.SubmitTestAttempt)
+			testRoutes.GET("/rewards", testHandler.GetUserRewards)
+			testRoutes.POST("/rewards", testHandler.CreateReward)
+			testRoutes.PUT("/rewards/:id", testHandler.UpdateReward)
+			testRoutes.GET("/rewards-catalog", testHandler.GetRewardsCatalog)
+			testRoutes.POST("/rewards-catalog", testHandler.CreateRewardCatalog)
+			testRoutes.PUT("/rewards-catalog/:id", testHandler.UpdateRewardCatalog)
+			testRoutes.DELETE("/rewards-catalog/:id", testHandler.DeleteRewardCatalog)
+
+			// Chatboard test routes
+			testRoutes.POST("/chatboard/activate", testHandler.ActivateTestInChatboard)
+			testRoutes.POST("/chatboard/deactivate", testHandler.DeactivateTestInChatboard)
+			testRoutes.GET("/chatboard/:chatboard_id", testHandler.GetChatboardTests)
+		}
 
 		// User info route
-		protected.GET("/userinfo", authHandler.GetUserInfo)
+		protected.GET("/userinfo", userHandler.GetUserInfo)
 
 		// Verification route
 		protected.POST("/verification", avatarHandler.VerifyUserSquad)

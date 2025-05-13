@@ -34,4 +34,5 @@ type PendingUserResponse struct {
 	SquadID   int    `json:"squad_id"`
 	SquadName string `json:"squad_name"`
 	Status    string `json:"status"`
+	Role      string `json:"role"`
 }

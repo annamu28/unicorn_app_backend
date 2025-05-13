@@ -52,3 +52,19 @@ type Reward struct {
 	AttemptID     int    `json:"attempt_id" binding:"required"`
 	RewardDetails string `json:"reward_details" binding:"required"`
 }
+
+type RewardCatalog struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name" binding:"required"`
+	Description string `json:"description" binding:"required"`
+	Points      int    `json:"points" binding:"required"`
+	Type        string `json:"type" binding:"required"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type CreateRewardCatalogRequest struct {
+	Name        string `json:"name" binding:"required"`
+	Description string `json:"description" binding:"required"`
+	Points      int    `json:"points" binding:"required"`
+	Type        string `json:"type" binding:"required"`
+}

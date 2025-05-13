@@ -157,16 +157,8 @@ func (h *PostHandler) GetPosts(c *gin.Context) {
 		return
 	}
 
-	// Updated query to get username and roles
+	// Get posts with user roles in the chatboard
 	rows, err := h.db.Query(`
-        WITH user_chatboard_roles AS (
-            SELECT DISTINCT ur.user_id, array_agg(r.role) as roles
-            FROM chatboard_roles cr
-            JOIN user_roles ur ON cr.role_id = ur.role_id
-            JOIN roles r ON ur.role_id = r.id
-            WHERE cr.chatboard_id = $1
-            GROUP BY ur.user_id
-        )
         SELECT 
             p.id,
             p.title,
@@ -174,11 +166,19 @@ func (h *PostHandler) GetPosts(c *gin.Context) {
             p.pinned,
             p.created_at,
             u.username,
-            COALESCE(ucr.roles, '{}') as user_roles
+            COALESCE(
+                ARRAY_AGG(DISTINCT r.role) FILTER (WHERE r.role IS NOT NULL),
+                ARRAY[]::VARCHAR[]
+            ) as user_roles
         FROM posts p
         JOIN users u ON p.user_id = u.id
-        LEFT JOIN user_chatboard_roles ucr ON u.id = ucr.user_id
+        LEFT JOIN user_squad_roles usr ON usr.user_id = u.id
+        LEFT JOIN roles r ON r.id = usr.role_id
+        LEFT JOIN chatboard_roles cr ON cr.role_id = r.id AND cr.chatboard_id = p.chatboard_id
+        LEFT JOIN chatboard_squads cs ON cs.chatboard_id = p.chatboard_id
+        LEFT JOIN user_squads us ON us.squad_id = cs.squad_id AND us.user_id = u.id
         WHERE p.chatboard_id = $1
+        GROUP BY p.id, p.title, p.content, p.pinned, p.created_at, u.username
         ORDER BY p.pinned DESC, p.created_at DESC`,
 		chatboardID)
 	if err != nil {

@@ -21,9 +21,9 @@ import (
 )
 
 func main() {
-	// Add godotenv at the start of main()
+	// Load .env file
 	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found") // Non-fatal in production
+		log.Fatal("Error loading .env file:", err)
 	}
 
 	// Get port from environment variable
@@ -85,7 +85,6 @@ func main() {
 	//if err := db.SeedData(database); err != nil {
 	//	log.Printf("Warning: Error seeding initial data: %v", err)
 	//}
-
 
 	// Initialize router
 	r := gin.Default()

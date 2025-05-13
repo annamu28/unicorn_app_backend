@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"strings"
 	"unicorn_app_backend/models"
 
 	"github.com/gin-gonic/gin"
@@ -123,6 +124,20 @@ func (h *TestHandler) SubmitTestAttempt(c *gin.Context) {
 		return
 	}
 
+	// Check if user has already attempted this test
+	var existingAttemptID int
+	err := h.db.QueryRow(
+		"SELECT id FROM test_attempts WHERE test_id = $1 AND user_id = $2",
+		attempt.TestID, userID,
+	).Scan(&existingAttemptID)
+	if err == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "You have already taken this test"})
+		return
+	} else if err != sql.ErrNoRows {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing attempt"})
+		return
+	}
+
 	// Start transaction
 	tx, err := h.db.Begin()
 	if err != nil {
@@ -131,21 +146,6 @@ func (h *TestHandler) SubmitTestAttempt(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// Get test reward details
-	var testRewardDetails string
-	err = tx.QueryRow(
-		"SELECT reward_details FROM tests WHERE id = $1",
-		attempt.TestID,
-	).Scan(&testRewardDetails)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Test not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get test details"})
-		return
-	}
-
 	// Insert test attempt
 	var attemptID int
 	err = tx.QueryRow(
@@ -153,6 +153,10 @@ func (h *TestHandler) SubmitTestAttempt(c *gin.Context) {
 		attempt.TestID, userID, attempt.Score,
 	).Scan(&attemptID)
 	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key") {
+			c.JSON(http.StatusConflict, gin.H{"error": "You have already taken this test"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create test attempt"})
 		return
 	}
@@ -170,23 +174,41 @@ func (h *TestHandler) SubmitTestAttempt(c *gin.Context) {
 		}
 	}
 
-	// Determine if the student gets the reward (e.g., if they score 60% or higher)
+	// Determine which reward to give based on score
+	var rewardCatalogID int
 	var rewardDetails string
-	if attempt.Score >= 60 {
-		rewardDetails = testRewardDetails
+	if attempt.Score >= 90 {
+		err = tx.QueryRow("SELECT id FROM rewards_catalog WHERE name = 'Test Master'").Scan(&rewardCatalogID)
+		rewardDetails = "Congratulations! You've achieved Test Master status!"
+	} else if attempt.Score >= 80 {
+		err = tx.QueryRow("SELECT id FROM rewards_catalog WHERE name = 'Quick Learner'").Scan(&rewardCatalogID)
+		rewardDetails = "Great job! You're a Quick Learner!"
+	} else if attempt.Score >= 70 {
+		err = tx.QueryRow("SELECT id FROM rewards_catalog WHERE name = 'Good Progress'").Scan(&rewardCatalogID)
+		rewardDetails = "Well done! You're making Good Progress!"
+	} else if attempt.Score >= 20 {
+		err = tx.QueryRow("SELECT id FROM rewards_catalog WHERE name = 'Test Completion'").Scan(&rewardCatalogID)
+		rewardDetails = "Good work! You've completed the test!"
 	} else {
-		rewardDetails = "Keep practicing! Score 60% or higher to earn the reward."
+		rewardDetails = "Keep practicing! Score 20% or higher to earn a reward."
 	}
 
-	// Insert reward
-	var rewardID int
-	err = tx.QueryRow(
-		"INSERT INTO rewards (attempt_id, reward_details, completed_at) VALUES ($1, $2, CURRENT_DATE) RETURNING id",
-		attemptID, rewardDetails,
-	).Scan(&rewardID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create reward"})
-		return
+	// If score is high enough, create the reward
+	if attempt.Score >= 20 {
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get reward catalog"})
+			return
+		}
+
+		var rewardID int
+		err = tx.QueryRow(
+			"INSERT INTO rewards (attempt_id, reward_catalog_id, reward_details, created_at) VALUES ($1, $2, $3, CURRENT_DATE) RETURNING id",
+			attemptID, rewardCatalogID, rewardDetails,
+		).Scan(&rewardID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create reward"})
+			return
+		}
 	}
 
 	// Commit transaction
@@ -200,7 +222,7 @@ func (h *TestHandler) SubmitTestAttempt(c *gin.Context) {
 		"attempt_id":     attemptID,
 		"score":          attempt.Score,
 		"reward_details": rewardDetails,
-		"earned_reward":  attempt.Score >= 60,
+		"earned_reward":  attempt.Score >= 20,
 	}
 	c.JSON(http.StatusCreated, response)
 }
@@ -229,7 +251,7 @@ func (h *TestHandler) GetUserRewards(c *gin.Context) {
 			rewardDetails string
 			testTitle     string
 			score         int
-			completedAt   string
+			completedAt   sql.NullTime
 		)
 		if err := rows.Scan(&id, &rewardDetails, &testTitle, &score, &completedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan rewards"})
@@ -240,7 +262,7 @@ func (h *TestHandler) GetUserRewards(c *gin.Context) {
 			"reward_details": rewardDetails,
 			"test_title":     testTitle,
 			"score":          score,
-			"completed_at":   completedAt,
+			"completed_at":   completedAt.Time.Format("2006-01-02 15:04"),
 		})
 	}
 
@@ -393,7 +415,7 @@ func (h *TestHandler) GetTests(c *gin.Context) {
 			lessonID      sql.NullInt64
 			title         string
 			rewardDetails string
-			createdAt     string
+			createdAt     sql.NullTime
 			lessonTitle   sql.NullString
 		)
 
@@ -406,7 +428,7 @@ func (h *TestHandler) GetTests(c *gin.Context) {
 			"id":             id,
 			"title":          title,
 			"reward_details": rewardDetails,
-			"created_at":     createdAt,
+			"created_at":     createdAt.Time.Format("2006-01-02 15:04"),
 		}
 
 		if lessonID.Valid {
@@ -446,12 +468,13 @@ func (h *TestHandler) GetTestByID(c *gin.Context) {
 	}
 
 	// Get test and lesson information
+	var createdAt sql.NullTime
 	err := h.db.QueryRow(`
 		SELECT t.id, t.lesson_id, t.title, t.reward_details, t.created_at, l.title
 		FROM tests t
 		LEFT JOIN lessons l ON t.lesson_id = l.id
 		WHERE t.id = $1
-	`, testID).Scan(&test.ID, &test.LessonID, &test.Title, &test.RewardDetails, &test.CreatedAt, &test.LessonTitle)
+	`, testID).Scan(&test.ID, &test.LessonID, &test.Title, &test.RewardDetails, &createdAt, &test.LessonTitle)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -460,6 +483,11 @@ func (h *TestHandler) GetTestByID(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch test"})
 		return
+	}
+
+	// Format the created_at time
+	if createdAt.Valid {
+		test.CreatedAt = createdAt.Time.Format("2006-01-02 15:04")
 	}
 
 	// Get questions
@@ -530,4 +558,317 @@ func (h *TestHandler) GetTestByID(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, test)
+}
+
+func (h *TestHandler) GetRewardsCatalog(c *gin.Context) {
+	rows, err := h.db.Query(`
+		SELECT id, name, description, points, type, created_at
+		FROM rewards_catalog
+		ORDER BY points DESC, name ASC
+	`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch rewards catalog"})
+		return
+	}
+	defer rows.Close()
+
+	var rewards []models.RewardCatalog
+	for rows.Next() {
+		var reward models.RewardCatalog
+		var createdAt sql.NullTime
+		if err := rows.Scan(&reward.ID, &reward.Name, &reward.Description, &reward.Points, &reward.Type, &createdAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan reward"})
+			return
+		}
+		if createdAt.Valid {
+			reward.CreatedAt = createdAt.Time.Format("2006-01-02 15:04")
+		}
+		rewards = append(rewards, reward)
+	}
+
+	c.JSON(http.StatusOK, rewards)
+}
+
+func (h *TestHandler) CreateRewardCatalog(c *gin.Context) {
+	// Check if user has required role
+	userRole := c.GetString("userRole")
+	if userRole != "Admin" && userRole != "Head Unicorn" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		return
+	}
+
+	var req models.CreateRewardCatalogRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var rewardID int
+	err := h.db.QueryRow(`
+		INSERT INTO rewards_catalog (name, description, points, type, created_at)
+		VALUES ($1, $2, $3, $4, CURRENT_DATE)
+		RETURNING id`,
+		req.Name, req.Description, req.Points, req.Type,
+	).Scan(&rewardID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create reward"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":          rewardID,
+		"name":        req.Name,
+		"description": req.Description,
+		"points":      req.Points,
+		"type":        req.Type,
+	})
+}
+
+func (h *TestHandler) UpdateRewardCatalog(c *gin.Context) {
+	// Check if user has required role
+	userRole := c.GetString("userRole")
+	if userRole != "Admin" && userRole != "Head Unicorn" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		return
+	}
+
+	rewardID := c.Param("id")
+	var req models.CreateRewardCatalogRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, err := h.db.Exec(`
+		UPDATE rewards_catalog
+		SET name = $1, description = $2, points = $3, type = $4
+		WHERE id = $5`,
+		req.Name, req.Description, req.Points, req.Type, rewardID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update reward"})
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify update"})
+		return
+	}
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Reward not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":          rewardID,
+		"name":        req.Name,
+		"description": req.Description,
+		"points":      req.Points,
+		"type":        req.Type,
+	})
+}
+
+func (h *TestHandler) DeleteRewardCatalog(c *gin.Context) {
+	// Check if user has required role
+	userRole := c.GetString("userRole")
+	if userRole != "Admin" && userRole != "Head Unicorn" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		return
+	}
+
+	rewardID := c.Param("id")
+
+	// Check if reward is being used
+	var count int
+	err := h.db.QueryRow(`
+		SELECT COUNT(*) FROM rewards WHERE reward_catalog_id = $1`,
+		rewardID,
+	).Scan(&count)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check reward usage"})
+		return
+	}
+	if count > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "Cannot delete reward that is in use"})
+		return
+	}
+
+	result, err := h.db.Exec("DELETE FROM rewards_catalog WHERE id = $1", rewardID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete reward"})
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify deletion"})
+		return
+	}
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Reward not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Reward deleted successfully"})
+}
+
+// ActivateTestInChatboard activates a test in a specific chatboard
+func (h *TestHandler) ActivateTestInChatboard(c *gin.Context) {
+	// Check if user has required role
+	userRole := c.GetString("userRole")
+	if userRole != "Admin" && userRole != "Head Unicorn" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		return
+	}
+
+	var req struct {
+		ChatboardID int `json:"chatboard_id" binding:"required"`
+		TestID      int `json:"test_id" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Check if chatboard exists
+	var chatboardExists bool
+	err := h.db.QueryRow("SELECT EXISTS(SELECT 1 FROM chatboards WHERE id = $1)", req.ChatboardID).Scan(&chatboardExists)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify chatboard"})
+		return
+	}
+	if !chatboardExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Chatboard not found"})
+		return
+	}
+
+	// Check if test exists
+	var testExists bool
+	err = h.db.QueryRow("SELECT EXISTS(SELECT 1 FROM tests WHERE id = $1)", req.TestID).Scan(&testExists)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify test"})
+		return
+	}
+	if !testExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Test not found"})
+		return
+	}
+
+	// Activate test in chatboard
+	var id int
+	err = h.db.QueryRow(`
+		INSERT INTO chatboard_tests (chatboard_id, test_id, is_active)
+		VALUES ($1, $2, true)
+		ON CONFLICT (chatboard_id, test_id) 
+		DO UPDATE SET is_active = true
+		RETURNING id
+	`, req.ChatboardID, req.TestID).Scan(&id)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to activate test in chatboard"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Test activated in chatboard successfully",
+		"id":      id,
+	})
+}
+
+// DeactivateTestInChatboard deactivates a test in a specific chatboard
+func (h *TestHandler) DeactivateTestInChatboard(c *gin.Context) {
+	// Check if user has required role
+	userRole := c.GetString("userRole")
+	if userRole != "Admin" && userRole != "Head Unicorn" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		return
+	}
+
+	var req struct {
+		ChatboardID int `json:"chatboard_id" binding:"required"`
+		TestID      int `json:"test_id" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, err := h.db.Exec(`
+		UPDATE chatboard_tests 
+		SET is_active = false 
+		WHERE chatboard_id = $1 AND test_id = $2
+	`, req.ChatboardID, req.TestID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deactivate test in chatboard"})
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify deactivation"})
+		return
+	}
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Test not found in chatboard"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Test deactivated in chatboard successfully",
+	})
+}
+
+// GetChatboardTests gets all tests for a specific chatboard
+func (h *TestHandler) GetChatboardTests(c *gin.Context) {
+	chatboardID := c.Param("chatboard_id")
+
+	rows, err := h.db.Query(`
+		SELECT t.id, t.title, t.reward_details, t.created_at, ct.is_active
+		FROM tests t
+		JOIN chatboard_tests ct ON t.id = ct.test_id
+		WHERE ct.chatboard_id = $1
+		ORDER BY t.created_at DESC
+	`, chatboardID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chatboard tests"})
+		return
+	}
+	defer rows.Close()
+
+	var tests []gin.H
+	for rows.Next() {
+		var (
+			id            int
+			title         string
+			rewardDetails string
+			createdAt     sql.NullTime
+			isActive      bool
+		)
+
+		if err := rows.Scan(&id, &title, &rewardDetails, &createdAt, &isActive); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan test"})
+			return
+		}
+
+		test := gin.H{
+			"id":             id,
+			"title":          title,
+			"reward_details": rewardDetails,
+			"is_active":      isActive,
+		}
+
+		if createdAt.Valid {
+			test["created_at"] = createdAt.Time.Format("2006-01-02 15:04")
+		}
+
+		tests = append(tests, test)
+	}
+
+	c.JSON(http.StatusOK, tests)
 }

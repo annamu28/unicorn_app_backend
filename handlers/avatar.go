@@ -291,11 +291,41 @@ func (h *AvatarHandler) VerifyUserSquad(c *gin.Context) {
 	`, req.UserID, req.SquadID).Scan(&exists)
 
 	if err != nil {
+		log.Printf("Error checking user-squad existence: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check user-squad existence"})
 		return
 	}
 
 	if !exists {
+		// Check if user exists
+		var userExists bool
+		err = tx.QueryRow("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)", req.UserID).Scan(&userExists)
+		if err != nil {
+			log.Printf("Error checking user existence: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check user existence"})
+			return
+		}
+
+		if !userExists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User does not exist"})
+			return
+		}
+
+		// Check if squad exists
+		var squadExists bool
+		err = tx.QueryRow("SELECT EXISTS (SELECT 1 FROM squads WHERE id = $1)", req.SquadID).Scan(&squadExists)
+		if err != nil {
+			log.Printf("Error checking squad existence: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check squad existence"})
+			return
+		}
+
+		if !squadExists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Squad does not exist"})
+			return
+		}
+
+		// If both user and squad exist but there's no association
 		c.JSON(http.StatusNotFound, gin.H{"error": "User is not associated with this squad"})
 		return
 	}
@@ -310,22 +340,6 @@ func (h *AvatarHandler) VerifyUserSquad(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
 		return
-	}
-
-	// Log the verification action
-	_, err = tx.Exec(`
-		INSERT INTO verification_logs (
-			admin_id,
-			user_id,
-			squad_id,
-			status,
-			verified_at
-		) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-	`, adminID, req.UserID, req.SquadID, req.Status)
-
-	if err != nil {
-		log.Printf("Failed to log verification action: %v", err)
-		// Continue even if logging fails
 	}
 
 	// Commit transaction

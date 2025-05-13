@@ -455,10 +455,13 @@ func (h *ChatboardHandler) GetPendingUsers(c *gin.Context) {
             u.email,
             s.id as squad_id,
             s.name as squad_name,
-            us.status
+            us.status,
+            COALESCE(r.role, '') as role
         FROM users u
         JOIN user_squads us ON us.user_id = u.id
         JOIN squads s ON s.id = us.squad_id
+        LEFT JOIN user_squad_roles usr ON usr.user_id = u.id AND usr.squad_id = s.id
+        LEFT JOIN roles r ON r.id = usr.role_id
         WHERE s.id IN (SELECT squad_id FROM chatboard_squad_ids)
         AND us.status = 'Pending'
         ORDER BY u.first_name, u.last_name, s.name
@@ -482,6 +485,7 @@ func (h *ChatboardHandler) GetPendingUsers(c *gin.Context) {
 			&user.SquadID,
 			&user.SquadName,
 			&user.Status,
+			&user.Role,
 		)
 		if err != nil {
 			log.Printf("Error scanning user row: %v", err)

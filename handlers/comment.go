@@ -40,40 +40,18 @@ func (h *CommentHandler) CreateComment(c *gin.Context) {
 		return
 	}
 
-	// Check if user has access to the chatboard and get their role
-	var hasAccess bool
+	// Get user's role
 	var userRole string
 	err = h.db.QueryRow(`
-        WITH user_access AS (
-            SELECT DISTINCT r.role
-            FROM chatboards cb
-            LEFT JOIN chatboard_squads cbs ON cb.id = cbs.chatboard_id
-            LEFT JOIN user_squads us ON us.squad_id = cbs.squad_id
-            LEFT JOIN chatboard_roles cbr ON cb.id = cbr.chatboard_id
-            LEFT JOIN user_roles ur ON ur.role_id = cbr.role_id
-            LEFT JOIN roles r ON r.id = ur.role_id
-            LEFT JOIN chatboard_countries cbc ON cb.id = cbc.chatboard_id
-            LEFT JOIN user_countries uc ON uc.country_id = cbc.country_id
-            WHERE cb.id = $1 
-            AND us.user_id = $2
-            AND (
-                (us.squad_id IS NOT NULL AND cbs.squad_id IS NOT NULL)
-                OR (ur.role_id IS NOT NULL AND cbr.role_id IS NOT NULL)
-                OR (uc.country_id IS NOT NULL AND cbc.country_id IS NOT NULL)
-            )
-            LIMIT 1
-        )
-        SELECT EXISTS (SELECT 1 FROM user_access), 
-               (SELECT role FROM user_access)
-    `, chatboardID, userID).Scan(&hasAccess, &userRole)
+        SELECT r.role
+        FROM user_roles ur
+        JOIN roles r ON r.id = ur.role_id
+        WHERE ur.user_id = $1
+        LIMIT 1
+    `, userID).Scan(&userRole)
 
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify access"})
-		return
-	}
-
-	if !hasAccess {
-		c.JSON(http.StatusForbidden, gin.H{"error": "You don't have access to this chatboard"})
+	if err != nil && err != sql.ErrNoRows {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user role"})
 		return
 	}
 
@@ -81,7 +59,7 @@ func (h *CommentHandler) CreateComment(c *gin.Context) {
 	var commentID int
 	err = h.db.QueryRow(`
         INSERT INTO comments (post_id, user_id, comment, created_at)
-        VALUES ($1, $2, $3, CURRENT_DATE)
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
         RETURNING id
     `, req.PostID, userID, req.Comment).Scan(&commentID)
 
