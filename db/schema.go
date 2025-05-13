@@ -6,8 +6,6 @@ import (
 )
 
 const Schema = `
--- Drop tables if they exist
-
 -- Create users table
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -248,14 +246,14 @@ CREATE TABLE IF NOT EXISTS rewards (
     id SERIAL PRIMARY KEY,
     attempt_id INTEGER NOT NULL,
     reward_details VARCHAR(255) NOT NULL,
-    completed_at DATE DEFAULT CURRENT_DATE,
-    FOREIGN KEY (attempt_id) REFERENCES test_attempts(id) ON DELETE CASCADE,
-    UNIQUE(attempt_id)
+    created_at DATE DEFAULT CURRENT_DATE,
+    FOREIGN KEY (attempt_id) REFERENCES test_attempts(id) ON DELETE CASCADE
 );
 `
 
 // InitSchema initializes the database schema
 func InitSchema(db *sql.DB) error {
+	// Execute the schema
 	_, err := db.Exec(Schema)
 	if err != nil {
 		return fmt.Errorf("error initializing database schema: %w", err)

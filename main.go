@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"unicorn_app_backend/db"
 	"unicorn_app_backend/routes"
 
 	_ "github.com/lib/pq"
@@ -64,16 +65,27 @@ func main() {
 	}
 
 	// Connect to database
-	db, err := sql.Open("postgres", dbURL)
+	database, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatalf("Error connecting to database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
 	// Test database connection
-	if err := db.Ping(); err != nil {
+	if err := database.Ping(); err != nil {
 		log.Fatalf("Error connecting to the database: %v", err)
 	}
+
+	// Initialize database schema
+	if err := db.InitSchema(database); err != nil {
+		log.Fatalf("Error initializing database schema: %v", err)
+	}
+
+	// Seed initial data
+	//if err := db.SeedData(database); err != nil {
+	//	log.Printf("Warning: Error seeding initial data: %v", err)
+	//}
+
 
 	// Initialize router
 	r := gin.Default()
@@ -97,7 +109,7 @@ func main() {
 	r.Use(cors.New(config))
 
 	// Setup routes
-	routes.SetupRoutes(r, db, jwtSecret)
+	routes.SetupRoutes(r, database, jwtSecret)
 
 	// Run server
 	srv := &http.Server{

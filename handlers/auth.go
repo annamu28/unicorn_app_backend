@@ -205,20 +205,24 @@ func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 
 	// Get squads with their roles
 	squadRows, err := h.db.Query(`
+		WITH squad_roles AS (
+			SELECT 
+				usr.squad_id,
+				usr.user_id,
+				ARRAY_AGG(r.role) as roles
+			FROM user_squad_roles usr
+			JOIN roles r ON r.id = usr.role_id
+			GROUP BY usr.squad_id, usr.user_id
+		)
 		SELECT 
 			s.id,
 			s.name,
 			us.status,
-			COALESCE(
-				ARRAY_AGG(r.role) FILTER (WHERE r.role IS NOT NULL),
-				ARRAY[]::VARCHAR[]
-			) as roles
+			COALESCE(sr.roles, ARRAY[]::VARCHAR[]) as roles
 		FROM user_squads us
 		JOIN squads s ON s.id = us.squad_id
-		LEFT JOIN user_squad_roles usr ON usr.squad_id = s.id AND usr.user_id = us.user_id
-		LEFT JOIN roles r ON r.id = usr.role_id
+		LEFT JOIN squad_roles sr ON sr.squad_id = s.id AND sr.user_id = us.user_id
 		WHERE us.user_id = $1
-		GROUP BY s.id, s.name, us.status
 		ORDER BY s.name
 	`, userID)
 	if err != nil {
@@ -228,17 +232,11 @@ func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 
 	for squadRows.Next() {
 		var squad models.UserSquad
-		var roles []sql.NullString
+		var roles []string
 		if err := squadRows.Scan(&squad.ID, &squad.Name, &squad.Status, pq.Array(&roles)); err != nil {
 			return profile, fmt.Errorf("failed to scan squad: %w", err)
 		}
-
-		squad.Roles = make([]string, 0)
-		for _, role := range roles {
-			if role.Valid {
-				squad.Roles = append(squad.Roles, role.String)
-			}
-		}
+		squad.Roles = roles
 		profile.Squads = append(profile.Squads, squad)
 	}
 
@@ -248,7 +246,6 @@ func (h *AuthHandler) getUserProfile(userID int) (models.UserProfile, error) {
 		FROM user_countries uc
 		JOIN countries c ON c.id = uc.country_id
 		WHERE uc.user_id = $1
-		ORDER BY c.name
 	`, userID)
 	if err != nil {
 		return profile, fmt.Errorf("failed to fetch countries: %w", err)

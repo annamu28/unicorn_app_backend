@@ -60,6 +60,57 @@ func (h *ChatboardHandler) CreateChatboard(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	// Validate squad IDs
+	if len(req.Access.SquadIDs) > 0 {
+		var count int
+		err = tx.QueryRow(`
+            SELECT COUNT(*) FROM squads WHERE id = ANY($1)
+        `, pq.Array(req.Access.SquadIDs)).Scan(&count)
+		if err != nil {
+			log.Printf("Error validating squad IDs: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate squad IDs"})
+			return
+		}
+		if count != len(req.Access.SquadIDs) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "One or more squad IDs are invalid"})
+			return
+		}
+	}
+
+	// Validate role IDs
+	if len(req.Access.RoleIDs) > 0 {
+		var count int
+		err = tx.QueryRow(`
+            SELECT COUNT(*) FROM roles WHERE id = ANY($1)
+        `, pq.Array(req.Access.RoleIDs)).Scan(&count)
+		if err != nil {
+			log.Printf("Error validating role IDs: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate role IDs"})
+			return
+		}
+		if count != len(req.Access.RoleIDs) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "One or more role IDs are invalid"})
+			return
+		}
+	}
+
+	// Validate country IDs
+	if len(req.Access.CountryIDs) > 0 {
+		var count int
+		err = tx.QueryRow(`
+            SELECT COUNT(*) FROM countries WHERE id = ANY($1)
+        `, pq.Array(req.Access.CountryIDs)).Scan(&count)
+		if err != nil {
+			log.Printf("Error validating country IDs: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate country IDs"})
+			return
+		}
+		if count != len(req.Access.CountryIDs) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "One or more country IDs are invalid"})
+			return
+		}
+	}
+
 	// Create chatboard
 	var chatboardID int
 	err = tx.QueryRow(`
@@ -70,6 +121,7 @@ func (h *ChatboardHandler) CreateChatboard(c *gin.Context) {
 	).Scan(&chatboardID)
 
 	if err != nil {
+		log.Printf("Error creating chatboard: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create chatboard"})
 		return
 	}
@@ -81,6 +133,7 @@ func (h *ChatboardHandler) CreateChatboard(c *gin.Context) {
             VALUES ($1, $2)`,
 			chatboardID, squadID)
 		if err != nil {
+			log.Printf("Error adding squad access: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add squad access"})
 			return
 		}
@@ -93,6 +146,7 @@ func (h *ChatboardHandler) CreateChatboard(c *gin.Context) {
             VALUES ($1, $2)`,
 			chatboardID, roleID)
 		if err != nil {
+			log.Printf("Error adding role access: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add role access"})
 			return
 		}
@@ -105,6 +159,7 @@ func (h *ChatboardHandler) CreateChatboard(c *gin.Context) {
             VALUES ($1, $2)`,
 			chatboardID, countryID)
 		if err != nil {
+			log.Printf("Error adding country access: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add country access"})
 			return
 		}
@@ -112,6 +167,7 @@ func (h *ChatboardHandler) CreateChatboard(c *gin.Context) {
 
 	// Commit transaction
 	if err = tx.Commit(); err != nil {
+		log.Printf("Error committing transaction: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
 		return
 	}
@@ -119,6 +175,7 @@ func (h *ChatboardHandler) CreateChatboard(c *gin.Context) {
 	// Get the created chatboard with access info
 	response, err := h.getChatboardInfo(chatboardID)
 	if err != nil {
+		log.Printf("Error fetching chatboard info: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chatboard info"})
 		return
 	}
@@ -215,60 +272,83 @@ func (h *ChatboardHandler) GetChatboards(c *gin.Context) {
 	filterCountry := c.Query("filter_country")
 
 	query := `
+        WITH user_access AS (
+            -- Get user's roles
+            SELECT DISTINCT r.id as role_id, r.role as role_name
+            FROM user_roles ur
+            JOIN roles r ON r.id = ur.role_id
+            WHERE ur.user_id = $1
+            UNION
+            -- Get user's squad roles
+            SELECT DISTINCT r.id as role_id, r.role as role_name
+            FROM user_squad_roles usr
+            JOIN roles r ON r.id = usr.role_id
+            WHERE usr.user_id = $1
+        )
         SELECT DISTINCT 
             cb.id,
             cb.title,
             cb.description,
             cb.created_at,
-            ARRAY_AGG(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL) as squad_names,
-            ARRAY_AGG(DISTINCT r.role) FILTER (WHERE r.role IS NOT NULL) as role_names,
-            ARRAY_AGG(DISTINCT co.name) FILTER (WHERE co.name IS NOT NULL) as country_names
+            COALESCE(
+                ARRAY_AGG(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL),
+                ARRAY[]::VARCHAR[]
+            ) as squad_names,
+            COALESCE(
+                ARRAY_AGG(DISTINCT r.role) FILTER (WHERE r.role IS NOT NULL),
+                ARRAY[]::VARCHAR[]
+            ) as role_names,
+            COALESCE(
+                ARRAY_AGG(DISTINCT co.name) FILTER (WHERE co.name IS NOT NULL),
+                ARRAY[]::VARCHAR[]
+            ) as country_names
         FROM chatboards cb
         LEFT JOIN chatboard_squads cbs ON cb.id = cbs.chatboard_id
         LEFT JOIN squads s ON cbs.squad_id = s.id
         LEFT JOIN chatboard_roles cbr ON cb.id = cbr.chatboard_id
         LEFT JOIN roles r ON cbr.role_id = r.id
-        LEFT JOIN squad_roles sr ON sr.role_id = r.id AND sr.squad_id = cbs.squad_id
         LEFT JOIN chatboard_countries cbc ON cb.id = cbc.chatboard_id
         LEFT JOIN countries co ON cbc.country_id = co.id
         LEFT JOIN user_squads us ON us.squad_id = s.id AND us.user_id = $1
-        LEFT JOIN user_roles ur ON ur.role_id = r.id AND ur.user_id = $1
         LEFT JOIN user_countries uc ON uc.country_id = co.id AND uc.user_id = $1
-        WHERE 1=1
+        WHERE (
+            -- User has access through roles
+            EXISTS (
+                SELECT 1 FROM chatboard_roles cr
+                JOIN user_access ua ON ua.role_id = cr.role_id
+                WHERE cr.chatboard_id = cb.id
+            )
+            OR
+            -- User has access through squads
+            EXISTS (
+                SELECT 1 FROM chatboard_squads cs
+                JOIN user_squads us ON us.squad_id = cs.squad_id
+                WHERE cs.chatboard_id = cb.id AND us.user_id = $1
+            )
+            OR
+            -- User has access through countries
+            EXISTS (
+                SELECT 1 FROM chatboard_countries cc
+                JOIN user_countries uc ON uc.country_id = cc.country_id
+                WHERE cc.chatboard_id = cb.id AND uc.user_id = $1
+            )
+        )
     `
 
 	params := []interface{}{userID}
 	paramCount := 1
 
-	// If both role and squad filters are provided, ensure they match together
-	if filterRole != "" && filterSquad != "" {
+	// Add filters if provided
+	if filterRole != "" {
 		paramCount++
-		paramCount++
-		query += fmt.Sprintf(`
-            AND EXISTS (
-                SELECT 1 
-                FROM chatboard_squads cbs2
-                JOIN squads s2 ON s2.id = cbs2.squad_id
-                JOIN squad_roles sr2 ON sr2.squad_id = s2.id
-                JOIN roles r2 ON r2.id = sr2.role_id
-                WHERE cbs2.chatboard_id = cb.id
-                AND s2.name = $%d
-                AND r2.role = $%d
-            )`, paramCount-1, paramCount)
-		params = append(params, filterSquad, filterRole)
-	} else {
-		// Handle individual filters
-		if filterSquad != "" {
-			paramCount++
-			query += fmt.Sprintf(" AND s.name = $%d", paramCount)
-			params = append(params, filterSquad)
-		}
+		query += fmt.Sprintf(" AND r.role = $%d", paramCount)
+		params = append(params, filterRole)
+	}
 
-		if filterRole != "" {
-			paramCount++
-			query += fmt.Sprintf(" AND r.role = $%d AND sr.squad_id IS NOT NULL", paramCount)
-			params = append(params, filterRole)
-		}
+	if filterSquad != "" {
+		paramCount++
+		query += fmt.Sprintf(" AND s.name = $%d", paramCount)
+		params = append(params, filterSquad)
 	}
 
 	if filterCountry != "" {
@@ -277,13 +357,11 @@ func (h *ChatboardHandler) GetChatboards(c *gin.Context) {
 		params = append(params, filterCountry)
 	}
 
-	query += `
-        GROUP BY cb.id, cb.title, cb.description, cb.created_at
-        ORDER BY cb.created_at DESC
-    `
+	query += " GROUP BY cb.id, cb.title, cb.description, cb.created_at ORDER BY cb.created_at DESC"
 
 	rows, err := h.db.Query(query, params...)
 	if err != nil {
+		log.Printf("Error fetching chatboards: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chatboards"})
 		return
 	}
@@ -292,41 +370,43 @@ func (h *ChatboardHandler) GetChatboards(c *gin.Context) {
 	var chatboards []models.ChatboardResponse
 	for rows.Next() {
 		var cb models.ChatboardResponse
-		var squads, roles, countries []sql.NullString
+		var createdAt sql.NullTime
+		var squadNames, roleNames, countryNames []string
 
 		err := rows.Scan(
 			&cb.ID,
 			&cb.Title,
 			&cb.Description,
-			&cb.CreatedAt,
-			pq.Array(&squads),
-			pq.Array(&roles),
-			pq.Array(&countries),
+			&createdAt,
+			pq.Array(&squadNames),
+			pq.Array(&roleNames),
+			pq.Array(&countryNames),
 		)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan chatboard"})
-			return
+			log.Printf("Error scanning chatboard row: %v", err)
+			continue
 		}
 
-		// Process arrays and remove null values
-		cb.Access.Squads = nullStringArrayToStringArray(squads)
-		cb.Access.Roles = nullStringArrayToStringArray(roles)
-		cb.Access.Countries = nullStringArrayToStringArray(countries)
+		if createdAt.Valid {
+			cb.CreatedAt = createdAt.Time.Format("2006-01-02")
+		}
+
+		cb.Access = models.ChatboardAccessInfo{
+			Squads:    squadNames,
+			Roles:     roleNames,
+			Countries: countryNames,
+		}
 
 		chatboards = append(chatboards, cb)
 	}
 
-	c.JSON(http.StatusOK, chatboards)
-}
-
-func nullStringArrayToStringArray(nullStrings []sql.NullString) []string {
-	var result []string
-	for _, ns := range nullStrings {
-		if ns.Valid {
-			result = append(result, ns.String)
-		}
+	if err = rows.Err(); err != nil {
+		log.Printf("Error iterating chatboard rows: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chatboards"})
+		return
 	}
-	return result
+
+	c.JSON(http.StatusOK, chatboards)
 }
 
 func (h *ChatboardHandler) GetPendingUsers(c *gin.Context) {

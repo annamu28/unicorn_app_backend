@@ -63,3 +63,72 @@ func (h *RoleHandler) GetRoles(c *gin.Context) {
 
 	c.JSON(http.StatusOK, roles)
 }
+
+// AssignGlobalRole handles assigning a global role to a user
+func (h *RoleHandler) AssignGlobalRole(c *gin.Context) {
+	var req models.AssignGlobalRoleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Start a transaction
+	tx, err := h.db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Check if user exists
+	var userExists bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", req.UserID).Scan(&userExists)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check user existence"})
+		return
+	}
+	if !userExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Check if role exists
+	var roleExists bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM roles WHERE id = $1)", req.RoleID).Scan(&roleExists)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check role existence"})
+		return
+	}
+	if !roleExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Role not found"})
+		return
+	}
+
+	// Insert the global role assignment
+	var response models.GlobalRoleResponse
+	err = tx.QueryRow(`
+		INSERT INTO user_roles (user_id, role_id, created_at)
+		VALUES ($1, $2, CURRENT_DATE)
+		RETURNING id, user_id, role_id, created_at`,
+		req.UserID, req.RoleID,
+	).Scan(&response.ID, &response.UserID, &response.RoleID, &response.CreatedAt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign role"})
+		return
+	}
+
+	// Get the role name
+	err = tx.QueryRow("SELECT role FROM roles WHERE id = $1", req.RoleID).Scan(&response.RoleName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get role name"})
+		return
+	}
+
+	// Commit the transaction
+	if err = tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, response)
+}

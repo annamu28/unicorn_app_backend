@@ -23,11 +23,16 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 	lessonHandler := handlers.NewLessonHandler(db)
 	attendanceHandler := handlers.NewAttendanceHandler(db)
 	testHandler := handlers.NewTestHandler(db)
+	healthHandler := handlers.NewHealthHandler(db)
 
 	// Public routes
+	r.GET("/health", healthHandler.HealthCheck)
+
+	// Auth routes
 	r.POST("/register", authHandler.Register)
 	r.POST("/login", authHandler.Login)
 	r.POST("/refresh", authHandler.RefreshToken)
+	r.POST("/logout", authHandler.Logout)
 
 	// Protected routes
 	protected := r.Group("/")
@@ -43,6 +48,7 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 		//Role routes
 		protected.POST("/roles", roleHandler.CreateRole)
 		protected.GET("/roles", roleHandler.GetRoles)
+		protected.POST("/roles/assign", roleHandler.AssignGlobalRole)
 
 		// Squad routes
 		protected.POST("/squads", squadHandler.CreateSquad)
@@ -83,9 +89,6 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 		protected.GET("/rewards", testHandler.GetUserRewards)
 		protected.POST("/rewards", testHandler.CreateReward)
 		protected.PUT("/rewards/:id", testHandler.UpdateReward)
-
-		// Logout route
-		protected.POST("/logout", authHandler.Logout)
 
 		// User info route
 		protected.GET("/userinfo", authHandler.GetUserInfo)
