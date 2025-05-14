@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 	"unicorn_app_backend/models"
 
 	"github.com/gin-gonic/gin"
@@ -502,4 +503,172 @@ func (h *ChatboardHandler) GetPendingUsers(c *gin.Context) {
 		"pending_users": pendingUsers,
 		"count":         len(pendingUsers),
 	})
+}
+
+func (h *ChatboardHandler) GetChatboardByID(c *gin.Context) {
+	userID := c.GetInt("userID")
+	chatboardID := c.Param("id")
+
+	// First check if the user has access to this chatboard through any means (roles, squads, or countries)
+	var hasAccess bool
+	err := h.db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 
+			FROM chatboards cb
+			WHERE cb.id = $2
+			AND (
+				-- Check squad access
+				EXISTS (
+					SELECT 1 FROM chatboard_squads cs
+					JOIN user_squads us ON us.squad_id = cs.squad_id
+					WHERE cs.chatboard_id = cb.id 
+					AND us.user_id = $1
+					AND us.status = 'approved'
+				)
+				OR
+				-- Check role access
+				EXISTS (
+					SELECT 1 FROM chatboard_roles cr
+					JOIN user_roles ur ON ur.role_id = cr.role_id
+					WHERE cr.chatboard_id = cb.id 
+					AND ur.user_id = $1
+				)
+				OR
+				-- Check country access
+				EXISTS (
+					SELECT 1 FROM chatboard_countries cc
+					JOIN user_countries uc ON uc.country_id = cc.country_id
+					WHERE cc.chatboard_id = cb.id 
+					AND uc.user_id = $1
+				)
+			)
+		)
+	`, userID, chatboardID).Scan(&hasAccess)
+
+	if err != nil {
+		log.Printf("Error checking chatboard access: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify access"})
+		return
+	}
+
+	if !hasAccess {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You don't have access to this chatboard"})
+		return
+	}
+
+	// Get chatboard details
+	var chatboard struct {
+		ID          int            `json:"id"`
+		Title       string         `json:"title"`
+		Description string         `json:"description"`
+		CreatedAt   time.Time      `json:"created_at"`
+		UpdatedAt   sql.NullTime   `json:"updated_at,omitempty"`
+		Squads      []string       `json:"squads"`
+		Roles       []string       `json:"roles"`
+		Countries   []string       `json:"countries"`
+		CreatorID   sql.NullInt64  `json:"creator_id,omitempty"`
+		CreatorName sql.NullString `json:"creator_name,omitempty"`
+	}
+
+	// Get basic chatboard info
+	err = h.db.QueryRow(`
+		SELECT 
+			c.id,
+			c.title,
+			c.description,
+			c.created_at,
+			c.updated_at,
+			c.creator_id,
+			CONCAT(u.first_name, ' ', u.last_name) as creator_name
+		FROM chatboards c
+		LEFT JOIN users u ON c.creator_id = u.id
+		WHERE c.id = $1
+	`, chatboardID).Scan(
+		&chatboard.ID,
+		&chatboard.Title,
+		&chatboard.Description,
+		&chatboard.CreatedAt,
+		&chatboard.UpdatedAt,
+		&chatboard.CreatorID,
+		&chatboard.CreatorName,
+	)
+
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Chatboard not found"})
+		return
+	} else if err != nil {
+		log.Printf("Error fetching chatboard: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chatboard details"})
+		return
+	}
+
+	// Get squads
+	rows, err := h.db.Query(`
+		SELECT s.name
+		FROM chatboard_squads cs
+		JOIN squads s ON s.id = cs.squad_id
+		WHERE cs.chatboard_id = $1
+	`, chatboardID)
+	if err != nil {
+		log.Printf("Error fetching squads: %v", err)
+	} else {
+		defer rows.Close()
+		for rows.Next() {
+			var squad string
+			if err := rows.Scan(&squad); err == nil {
+				chatboard.Squads = append(chatboard.Squads, squad)
+			}
+		}
+	}
+
+	// Get roles
+	rows, err = h.db.Query(`
+		SELECT r.role
+		FROM chatboard_roles cr
+		JOIN roles r ON r.id = cr.role_id
+		WHERE cr.chatboard_id = $1
+	`, chatboardID)
+	if err != nil {
+		log.Printf("Error fetching roles: %v", err)
+	} else {
+		defer rows.Close()
+		for rows.Next() {
+			var role string
+			if err := rows.Scan(&role); err == nil {
+				chatboard.Roles = append(chatboard.Roles, role)
+			}
+		}
+	}
+
+	// Get countries
+	rows, err = h.db.Query(`
+		SELECT c.name
+		FROM chatboard_countries cc
+		JOIN countries c ON c.id = cc.country_id
+		WHERE cc.chatboard_id = $1
+	`, chatboardID)
+	if err != nil {
+		log.Printf("Error fetching countries: %v", err)
+	} else {
+		defer rows.Close()
+		for rows.Next() {
+			var country string
+			if err := rows.Scan(&country); err == nil {
+				chatboard.Countries = append(chatboard.Countries, country)
+			}
+		}
+	}
+
+	// Initialize empty arrays if null
+	if chatboard.Squads == nil {
+		chatboard.Squads = make([]string, 0)
+	}
+	if chatboard.Roles == nil {
+		chatboard.Roles = make([]string, 0)
+	}
+	if chatboard.Countries == nil {
+		chatboard.Countries = make([]string, 0)
+	}
+
+	c.JSON(http.StatusOK, chatboard)
 }

@@ -30,16 +30,18 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 	// Public routes
 	r.GET("/health", healthHandler.HealthCheck)
 
-	// Auth routes
+	// Auth routes (public)
 	r.POST("/register", authHandler.Register)
 	r.POST("/login", authHandler.Login)
 	r.POST("/refresh", authHandler.RefreshToken)
-	r.POST("/logout", authHandler.Logout)
 
 	// Protected routes
 	protected := r.Group("/")
 	protected.Use(middleware.AuthMiddleware(db, jwtSecret)) // Pass the required parameters
 	{
+		// Auth routes that require authentication
+		protected.POST("/logout", authHandler.Logout)
+
 		//Avatar route
 		protected.POST("/avatar", avatarHandler.CreateUserAvatar)
 
@@ -59,6 +61,7 @@ func SetupRoutes(r *gin.Engine, db *sql.DB, jwtSecret []byte) {
 		// Chatboard routes
 		protected.POST("/chatboards", chatboardHandler.CreateChatboard)
 		protected.GET("/chatboards", chatboardHandler.GetChatboards)
+		protected.GET("/chatboards/:id", chatboardHandler.GetChatboardByID)
 		protected.GET("/chatboards/:id/pending-users", chatboardHandler.GetPendingUsers)
 
 		// Post routes

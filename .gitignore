@@ -1,17 +1,61 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+
+# Dependency directories
+vendor/
+
 # Environment variables
 .env
 .env.*
 !.env.example
-
-# Binary
-/bin
 
 # IDE specific files
 .idea/
 .vscode/
 *.swp
 *.swo
+*.swn
+*~
 
 # OS specific files
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Fly.io related files
+fly.toml
+.fly/
+fly.dockerfile
+*_fly.*
+*fly*.sh
+*fly*.yml
+*fly*.yaml
+.sh
+
+# Go workspace file
+go.work
+
+# Debug files
+__debug_bin
+debug
+
+# Logs
+*.log
+
+# Local database files
+*.db
+*.sqlite
+
+# Build artifacts
+dist/
