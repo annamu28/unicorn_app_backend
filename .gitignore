@@ -34,14 +34,14 @@ vendor/
 Thumbs.db
 
 # Fly.io related files
-fly.toml
+*.toml
 .fly/
 fly.dockerfile
 *_fly.*
 *fly*.sh
 *fly*.yml
 *fly*.yaml
-.sh
+*.sh
 
 # Go workspace file
 go.work
